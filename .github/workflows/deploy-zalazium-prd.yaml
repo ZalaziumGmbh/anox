@@ -20,8 +20,8 @@ jobs:
       
       # Build a Docker image of your application and tag the image with the latest commit SHA
       - name: Build container image
-        run: docker build -t ${{ secrets.DOCKER_USER }}/anox:zalazium-prd .
+        run: docker build -t ${{ secrets.DOCKER_USER }}/anox:prd .
       
       # Push image to Docker Hub
       - name: Push image to Docker Hub
-        run: docker push ${{ secrets.DOCKER_USER }}/anox:zalazium-prd
+        run: docker push ${{ secrets.DOCKER_USER }}/anox:prd
