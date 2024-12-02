@@ -2,6 +2,8 @@ import typography from '@tailwindcss/typography';
 import containerQuries from '@tailwindcss/container-queries';
 
 /** @type {import('tailwindcss').Config} */
+import typography from '@tailwindcss/typography';
+
 export default {
 	darkMode: 'class',
 	content: ['./src/**/*.{html,js,svelte,ts}'],
@@ -39,5 +41,5 @@ export default {
 			}
 		}
 	},
-	plugins: [typography, containerQuries]
+	plugins: [typography],
 };
