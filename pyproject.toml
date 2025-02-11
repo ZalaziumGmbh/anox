@@ -82,6 +82,7 @@ dependencies = [
     "validators==0.34.0",
     "psutil",
     "sentencepiece",
+    "pymupdf==1.25.3",
     "soundfile==0.13.1",
     "azure-ai-documentintelligence==1.0.0",
 
