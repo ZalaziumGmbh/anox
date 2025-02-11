@@ -91,6 +91,8 @@ extract_msg
 pydub
 duckduckgo-search~=7.3.0
 
+PyMuPDF==1.25.3
+
 ## Google Drive
 google-api-python-client
 google-auth-httplib2

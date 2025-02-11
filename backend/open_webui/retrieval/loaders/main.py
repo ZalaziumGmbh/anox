@@ -9,6 +9,7 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
     OutlookMessageLoader,
     PyPDFLoader,
+    PyMuPDFLoader,
     TextLoader,
     UnstructuredEPubLoader,
     UnstructuredExcelLoader,
@@ -149,8 +150,8 @@ class Loader:
                 )
         else:
             if file_ext == "pdf":
-                loader = PyPDFLoader(
-                    file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES")
+                loader = PyMuPDFLoader(
+                    file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES"),
                 )
             elif file_ext == "csv":
                 loader = CSVLoader(file_path)
