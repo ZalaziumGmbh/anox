@@ -312,9 +312,16 @@ cypress/screenshots
 src/lib/i18n/locales/**/*.json
 # But keep tracking the default language file
 !src/lib/i18n/locales/en-US/translation.json
+!src/lib/i18n/locales/de-DE/translation.json
 
 #ignore favicon.png splash-dark.png splash.png and logo.png
 favicon.png
 splash-dark.png
 splash.png
 logo.png
+favicon-96x96.png
+apple-touch-icon.png
+favicon.ico
+favicon.svg
+web-app-manifest-192x192.png
+web-app-manifest-512x512.png
