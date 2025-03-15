@@ -117,6 +117,7 @@ dependencies = [
     "pdf2image>=1.16.0",
     "unstructured_pytesseract>=0.3.0",
     "pytesseract>=0.3.10",
+    "unstructured_inference>=0.3.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.11, < 3.13.0a1"

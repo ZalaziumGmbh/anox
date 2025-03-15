@@ -114,5 +114,6 @@ ldap3==2.9.1
 pdfminer.six>=20221105
 pi_heif>=0.7.0
 pdf2image>=1.16.0
+unstructured_inference>=0.3.0
 unstructured_pytesseract>=0.3.0
 pytesseract>=0.3.10
