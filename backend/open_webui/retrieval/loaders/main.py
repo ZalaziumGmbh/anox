@@ -2,25 +2,25 @@ import requests
 import logging
 import ftfy
 import sys
-
+from unstructured.partition.pdf import partition_pdf
+from unstructured.partition.auto import partition
 from langchain_community.document_loaders import (
     BSHTMLLoader,
     CSVLoader,
     Docx2txtLoader,
     OutlookMessageLoader,
-    PyPDFLoader,
     PyMuPDFLoader,
     TextLoader,
     UnstructuredEPubLoader,
     UnstructuredExcelLoader,
-    UnstructuredMarkdownLoader,
     UnstructuredPowerPointLoader,
     UnstructuredRSTLoader,
     UnstructuredXMLLoader,
-    YoutubeLoader,
+    UnstructuredPDFLoader
 )
 from langchain_core.documents import Document
 from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
+
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -124,8 +124,23 @@ class Loader:
     def load(
         self, filename: str, file_content_type: str, file_path: str
     ) -> list[Document]:
+        file_ext = filename.split(".")[-1].lower()
         loader = self._get_loader(filename, file_content_type, file_path)
         docs = loader.load()
+
+        if file_ext == "pdf":
+            extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES", False)
+            if not docs or all(not doc.page_content.strip() for doc in docs):
+                log.warning(f"PyMuPDFLoader returned empty or invalid content for {filename}")
+                loader = UnstructuredPDFLoader(file_path, extract_images=extract_images)
+                try:
+                    docs = loader.load()
+                    if not docs or all(not doc.page_content.strip() for doc in docs):
+                        log.error(f"UnstructuredPDFLoader also returned empty content for {filename}")
+                        raise e
+                except Exception as e:
+                    log.error(f"UnstructuredPDFLoader failed for {filename}: {e}")
+                    raise e
 
         return [
             Document(
@@ -150,9 +165,7 @@ class Loader:
                 )
         else:
             if file_ext == "pdf":
-                loader = PyMuPDFLoader(
-                    file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES"),
-                )
+                loader = PyMuPDFLoader(file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES"))
             elif file_ext == "csv":
                 loader = CSVLoader(file_path)
             elif file_ext == "rst":

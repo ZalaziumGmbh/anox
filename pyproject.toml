@@ -64,8 +64,8 @@ dependencies = [
     "fpdf2==2.8.2",
     "pymdown-extensions==10.14.2",
     "docx2txt==0.8",
-    "python-pptx==1.0.0",
-    "unstructured==0.16.11",
+    "python-pptx>=1.0.0",
+    "unstructured==0.16.17",
     "nltk==3.9.1",
     "Markdown==3.7",
     "pypandoc==1.13",
@@ -111,6 +111,12 @@ dependencies = [
 
     "ldap3==2.9.1",
     "gcp-storage-emulator>=2024.8.3",
+
+    "pdfminer.six>=20221105",
+    "pi_heif>=0.7.0",
+    "pdf2image>=1.16.0",
+    "unstructured_pytesseract>=0.3.0",
+    "pytesseract>=0.3.10",
 ]
 readme = "README.md"
 requires-python = ">= 3.11, < 3.13.0a1"
