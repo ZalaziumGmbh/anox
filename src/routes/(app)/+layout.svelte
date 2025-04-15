@@ -42,6 +42,8 @@
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SettingsModal from '$lib/components/chat/SettingsModal.svelte';
 	import AccountPending from '$lib/components/layout/Overlay/AccountPending.svelte';
+	import { get } from 'svelte/store';
+	import Spinner from '$lib/components/common/Spinner.svelte';
 
 	const i18n = getContext('i18n');
 
