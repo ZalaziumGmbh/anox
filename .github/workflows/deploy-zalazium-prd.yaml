@@ -1,5 +1,4 @@
 # cicd
-
 name: deploy-zalazium-prd
 on:
   push:
