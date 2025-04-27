@@ -2,7 +2,8 @@ import requests
 import logging
 import ftfy
 import sys
-
+from unstructured.partition.pdf import partition_pdf
+from unstructured.partition.auto import partition
 from langchain_community.document_loaders import (
     AzureAIDocumentIntelligenceLoader,
     BSHTMLLoader,
@@ -19,6 +20,7 @@ from langchain_community.document_loaders import (
     UnstructuredRSTLoader,
     UnstructuredXMLLoader,
     YoutubeLoader,
+    UnstructuredPDFLoader
 )
 from langchain_core.documents import Document
 
@@ -175,9 +177,24 @@ class Loader:
     def load(
         self, filename: str, file_content_type: str, file_path: str
     ) -> list[Document]:
+        file_extension = filename.split(".")[-1].lower()
         loader = self._get_loader(filename, file_content_type, file_path)
         docs = loader.load()
 
+        if file_extension == "pdf":
+            extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES", False)
+            if not docs or all(not doc.page_content.strip() for doc in docs):
+                log.warning(f"PyMuPDFLoader returned empty or invalid content for {filename}")
+                loader = UnstructuredPDFLoader(file_path, extract_images=extract_images)
+                try:
+                    docs = loader.load()
+                    if not docs or all(not doc.page_content.strip() for doc in docs):
+                        log.error(f"UnstructuredPDFLoader also returned empty content for {filename}")
+                        raise
+                except Exception as e:
+                    log.error(f"UnstructuredPDFLoader failed for {filename}: {e}")
+                    raise e
+        
         return [
             Document(
                 page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata
