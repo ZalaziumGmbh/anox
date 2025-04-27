@@ -64,7 +64,7 @@ pypdf==4.3.1
 fpdf2==2.8.2
 pymdown-extensions==10.14.2
 docx2txt==0.8
-python-pptx==1.0.0
+python-pptx>=1.0.0
 unstructured==0.16.17
 nltk==3.9.1
 Markdown==3.7
@@ -121,6 +121,14 @@ azure-storage-blob==12.24.1
 
 ## LDAP
 ldap3==2.9.1
+
+#OCR Libraries
+pdfminer.six>=20221105
+pi_heif>=0.7.0
+pdf2image>=1.16.0
+unstructured_inference>=0.3.0
+unstructured_pytesseract>=0.3.0
+pytesseract>=0.3.10
 
 ## Firecrawl
 firecrawl-py==1.12.0
