@@ -35,8 +35,15 @@ export default defineConfig({
 		APP_BUILD_HASH: JSON.stringify(process.env.APP_BUILD_HASH || 'dev-build')
 	},
 	build: {
-		sourcemap: true
-	},
+		sourcemap: true,
+		minify: 'terser',
+		terserOptions: {
+		  compress: {
+			pure_funcs: ['console.log', 'console.warn'],
+			drop_debugger: true,
+		  },
+		},
+	  },
 	worker: {
 		format: 'es'
 	}
