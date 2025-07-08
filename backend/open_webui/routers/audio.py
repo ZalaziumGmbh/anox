@@ -1,12 +1,14 @@
+from pydub.utils import mediainfo
 import hashlib
 import json
 import logging
 import os
 import uuid
+import subprocess
+import math
+import time
+import psutil
 from functools import lru_cache
-from pathlib import Path
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -72,9 +74,6 @@ SPEECH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 #
 ##########################################
 
-from pydub import AudioSegment
-from pydub.utils import mediainfo
-
 
 def is_audio_conversion_required(file_path):
     """
@@ -107,13 +106,42 @@ def is_audio_conversion_required(file_path):
 
 
 def convert_audio_to_mp3(file_path):
-    """Convert audio file to mp3 format."""
+    """Convert audio file to mp3 format using ffmpeg (no memory loading)."""
+    start_time = time.time()
+    start_memory = get_memory_usage()
+
     try:
         output_path = os.path.splitext(file_path)[0] + ".mp3"
-        audio = AudioSegment.from_file(file_path)
-        audio.export(output_path, format="mp3")
-        log.info(f"Converted {file_path} to {output_path}")
-        return output_path
+        original_size = os.path.getsize(file_path)
+
+        log.info(
+            f"[CONVERT] Starting conversion of {original_size/(1024*1024):.1f}MB file")
+        log.info(f"[MEMORY] Initial: RSS={start_memory['rss']:.1f}MB")
+
+        cmd = [
+            'ffmpeg',
+            '-i', file_path,
+            '-acodec', 'mp3',
+            '-y',  # Overwrite output
+            output_path
+        ]
+
+        ffmpeg_start = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        ffmpeg_duration = time.time() - ffmpeg_start
+
+        if result.returncode == 0:
+            output_size = os.path.getsize(output_path)
+            log_performance("Conversion", start_time, start_memory)
+
+            log.info(
+                f"[CONVERT] Success: {original_size/(1024*1024):.1f}MB → {output_size/(1024*1024):.1f}MB")
+            log.info(f"[CONVERT] FFmpeg time: {ffmpeg_duration:.2f}s")
+            return output_path
+        else:
+            log.error(f"ffmpeg conversion failed: {result.stderr}")
+            return None
+
     except Exception as e:
         log.error(f"Error converting audio file: {e}")
         return None
@@ -798,18 +826,34 @@ def transcription_handler(request, file_path, metadata):
 def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None):
     log.info(f"transcribe: {file_path} {metadata}")
 
-    if is_audio_conversion_required(file_path):
-        file_path = convert_audio_to_mp3(file_path)
+    # Track overall time and memory
+    start_time = time.time()
+    start_memory = get_memory_usage()
+    original_size = os.path.getsize(file_path)
 
+    # Conversion if needed
+    if is_audio_conversion_required(file_path):
+        conversion_start = time.time()
+        file_path = convert_audio_to_mp3(file_path)
+        log.info(
+            f"[TIMING] Conversion took {time.time() - conversion_start:.2f}s")
+
+    # Compression
     try:
+        compression_start = time.time()
         file_path = compress_audio(file_path)
+        log.info(
+            f"[TIMING] Compression took {time.time() - compression_start:.2f}s")
     except Exception as e:
         log.exception(e)
 
     # Always produce a list of chunk paths (could be one entry if small)
     try:
-        chunk_paths = split_audio(file_path, MAX_FILE_SIZE)
+        split_start = time.time()
+        chunk_paths = split_audio(file_path)
         print(f"Chunk paths: {chunk_paths}")
+        log.info(
+            f"[TIMING] Splitting took {time.time() - split_start:.2f}s, created {len(chunk_paths)} chunks")
     except Exception as e:
         log.exception(e)
         raise HTTPException(
@@ -818,11 +862,14 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
         )
 
     results = []
+    transcription_start = time.time()
+
     try:
         with ThreadPoolExecutor() as executor:
             # Submit tasks for each chunk_path
             futures = [
-                executor.submit(transcription_handler, request, chunk_path, metadata)
+                executor.submit(transcription_handler,
+                                request, chunk_path, metadata)
                 for chunk_path in chunk_paths
             ]
             # Gather results as they complete
@@ -834,80 +881,378 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Error transcribing chunk: {transcribe_exc}",
                     )
+
+        log.info(
+            f"[TIMING] Transcription took {time.time() - transcription_start:.2f}s")
+
     finally:
         # Clean up only the temporary chunks, never the original file
+        cleanup_start = time.time()
+        cleanup_count = 0
+
         for chunk_path in chunk_paths:
             if chunk_path != file_path and os.path.isfile(chunk_path):
                 try:
                     os.remove(chunk_path)
+                    cleanup_count += 1
                 except Exception:
                     pass
 
+        log.info(
+            f"[TIMING] Cleanup took {time.time() - cleanup_start:.2f}s, removed {cleanup_count} files")
+
+    # Final metrics
+    total_time = time.time() - start_time
+    end_memory = get_memory_usage()
+    memory_delta = end_memory['rss'] - start_memory['rss']
+
+    combined_text = " ".join([result["text"] for result in results])
+
+    log.info(f"[METRICS] Total time: {total_time:.2f}s")
+    log.info(f"[METRICS] Original size: {original_size/(1024*1024):.1f}MB")
+    log.info(
+        f"[METRICS] Processing speed: {original_size/(1024*1024)/total_time:.2f} MB/s")
+    log.info(f"[METRICS] Memory used: {memory_delta:+.1f}MB")
+    log.info(f"[METRICS] Words transcribed: {len(combined_text.split())}")
+
     return {
-        "text": " ".join([result["text"] for result in results]),
+        "text": combined_text,
     }
 
 
 def compress_audio(file_path):
-    if os.path.getsize(file_path) > MAX_FILE_SIZE:
-        id = os.path.splitext(os.path.basename(file_path))[
-            0
-        ]  # Handles names with multiple dots
-        file_dir = os.path.dirname(file_path)
+    """
+    Compress audio file to reduce size, regardless of current size.
+    Always compresses to 32kbps mono for consistency.
+    Uses ffmpeg to avoid loading file into memory.
+    """
+    start_time = time.time()
+    start_memory = get_memory_usage()
 
-        audio = AudioSegment.from_file(file_path)
-        audio = audio.set_frame_rate(16000).set_channels(1)  # Compress audio
+    id = os.path.splitext(os.path.basename(file_path))[0]
+    file_dir = os.path.dirname(file_path)
+    compressed_path = os.path.join(file_dir, f"{id}_compressed.mp3")
 
-        compressed_path = os.path.join(file_dir, f"{id}_compressed.mp3")
-        audio.export(compressed_path, format="mp3", bitrate="32k")
-        # log.debug(f"Compressed audio to {compressed_path}")  # Uncomment if log is defined
+    # Check if already compressed (to avoid double compression)
+    if "_compressed" in id:
+        return file_path
 
-        return compressed_path
-    else:
+    try:
+        # Get original file size for logging
+        original_size = os.path.getsize(file_path)
+        log.info(
+            f"[COMPRESS] Starting compression of {original_size/(1024*1024):.1f}MB file")
+        log.info(
+            f"[MEMORY] Initial: RSS={start_memory['rss']:.1f}MB, VMS={start_memory['vms']:.1f}MB")
+
+        # Direct ffmpeg conversion without loading into memory
+        cmd = [
+            'ffmpeg',
+            '-i', file_path,
+            '-ar', '16000',     # Sample rate 16kHz
+            '-ac', '1',         # Mono channel
+            '-b:a', '32k',      # Bitrate 32kbps
+            '-y',               # Overwrite output
+            '-loglevel', 'info',
+            compressed_path
+        ]
+
+        ffmpeg_start = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        ffmpeg_duration = time.time() - ffmpeg_start
+
+        if result.returncode == 0:
+            compressed_size = os.path.getsize(compressed_path)
+            compression_ratio = original_size / compressed_size
+
+            log_performance("Compression", start_time, start_memory)
+
+            log.info(
+                f"[COMPRESS] Success: {original_size/(1024*1024):.1f}MB → {compressed_size/(1024*1024):.1f}MB")
+            log.info(
+                f"[COMPRESS] Ratio: {compression_ratio:.1f}:1, FFmpeg time: {ffmpeg_duration:.2f}s")
+
+            return compressed_path
+        else:
+            log.error(f"ffmpeg compression failed: {result.stderr}")
+            return file_path
+
+    except FileNotFoundError:
+        log.error("ffmpeg not found. Please install ffmpeg for audio compression.")
+        return file_path
+    except Exception as e:
+        log.error(f"Error in compress_audio: {e}")
         return file_path
 
 
-def split_audio(file_path, max_bytes, format="mp3", bitrate="32k"):
+def split_audio(file_path, max_bytes=MAX_FILE_SIZE, format="mp3", bitrate="32k"):
     """
-    Splits audio into chunks not exceeding max_bytes.
-    Returns a list of chunk file paths. If audio fits, returns list with original path.
+    Split audio into chunks not exceeding max_bytes (20MB).
+    Optimized version using ffmpeg segment muxer for efficiency.
     """
+    start_time = time.time()
+    start_memory = get_memory_usage()
+
     file_size = os.path.getsize(file_path)
+    log.info(f"[SPLIT] Starting split of {file_size/(1024*1024):.1f}MB file")
+    log.info(
+        f"[MEMORY] Initial: RSS={start_memory['rss']:.1f}MB, VMS={start_memory['vms']:.1f}MB")
+
     if file_size <= max_bytes:
-        return [file_path]  # Nothing to split
-
-    audio = AudioSegment.from_file(file_path)
-    duration_ms = len(audio)
-    orig_size = file_size
-
-    approx_chunk_ms = max(int(duration_ms * (max_bytes / orig_size)) - 1000, 1000)
-    chunks = []
-    start = 0
-    i = 0
+        log.info(
+            f"[SPLIT] File size {file_size/(1024*1024):.1f}MB <= {max_bytes/(1024*1024):.1f}MB limit, no split needed")
+        return [file_path]
 
     base, _ = os.path.splitext(file_path)
 
-    while start < duration_ms:
-        end = min(start + approx_chunk_ms, duration_ms)
-        chunk = audio[start:end]
-        chunk_path = f"{base}_chunk_{i}.{format}"
-        chunk.export(chunk_path, format=format, bitrate=bitrate)
+    # First, try the most efficient method: ffmpeg segment muxer
+    chunks = split_audio_segment_muxer(
+        file_path, base, max_bytes, format, bitrate)
+    if chunks:
+        log_performance("Split (segment muxer)", start_time, start_memory)
+        return chunks
 
-        # Reduce chunk duration if still too large
-        while os.path.getsize(chunk_path) > max_bytes and (end - start) > 5000:
-            end = start + ((end - start) // 2)
-            chunk = audio[start:end]
-            chunk.export(chunk_path, format=format, bitrate=bitrate)
-
-        if os.path.getsize(chunk_path) > max_bytes:
-            os.remove(chunk_path)
-            raise Exception("Audio chunk cannot be reduced below max file size.")
-
-        chunks.append(chunk_path)
-        start = end
-        i += 1
-
+    # Fallback to manual chunking if segment muxer fails
+    log.info("[SPLIT] Segment muxer failed, trying manual chunking")
+    chunks = split_audio_manual(file_path, base, max_bytes, format, bitrate)
+    log_performance("Split (manual)", start_time, start_memory)
     return chunks
+
+
+def split_audio_segment_muxer(file_path, base_name, max_bytes, format="mp3", bitrate="32k"):
+    """
+    Use ffmpeg's segment muxer for efficient splitting.
+    This is the most efficient method as it processes the file in a single pass.
+    """
+    segment_start = time.time()
+    segment_memory = get_memory_usage()
+
+    try:
+        # Get actual duration of the compressed file
+        duration = get_audio_duration_ffmpeg(file_path)
+        if duration == 0:
+            return []
+
+        # Calculate segment time based on bitrate and max size (20MB)
+        bitrate_numeric = int(bitrate.rstrip('k')) * \
+            1000  # 32k = 32000 bits/second
+
+        # Maximum seconds for 20MB at given bitrate with 90% safety margin
+        max_seconds = (max_bytes * 8 * 0.9) / bitrate_numeric
+
+        # Use actual file size to determine if we need conservative chunking
+        file_size = os.path.getsize(file_path)
+        if file_size < max_bytes * 2:
+            # If file is less than 40MB, use larger chunks
+            segment_seconds = min(max_seconds, duration / 2)
+        else:
+            # For larger files, use optimal chunk size
+            segment_seconds = max_seconds
+
+        expected_chunks = math.ceil(duration / segment_seconds)
+        log.info(
+            f"[SEGMENT] File: {file_size/(1024*1024):.1f}MB, Duration: {duration:.1f}s")
+        log.info(
+            f"[SEGMENT] Chunk duration: {segment_seconds:.1f}s, Expected chunks: {expected_chunks}")
+
+        segment_pattern = f"{base_name}_chunk_%03d.{format}"
+
+        cmd = [
+            'ffmpeg',
+            '-i', file_path,
+            '-f', 'segment',
+            '-segment_time', str(int(segment_seconds)),
+            '-c', 'copy',  # Copy codec to avoid re-encoding
+            '-reset_timestamps', '1',
+            '-avoid_negative_ts', 'make_zero',
+            segment_pattern
+        ]
+
+        ffmpeg_start = time.time()
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        ffmpeg_duration = time.time() - ffmpeg_start
+
+        if result.returncode == 0:
+            # Collect generated chunks
+            chunks = []
+            total_chunk_size = 0
+            i = 0
+            while True:
+                chunk_path = f"{base_name}_chunk_{i:03d}.{format}"
+                if os.path.exists(chunk_path):
+                    chunk_size = os.path.getsize(chunk_path)
+                    # Verify each chunk is under 20MB
+                    if chunk_size <= max_bytes:
+                        chunks.append(chunk_path)
+                        total_chunk_size += chunk_size
+                        log.debug(
+                            f"[CHUNK] {i}: {chunk_size / (1024*1024):.2f}MB")
+                    else:
+                        # If any chunk exceeds 20MB, clean up and return empty
+                        log.warning(
+                            f"[CHUNK] {chunk_path} exceeds 20MB limit: {chunk_size / (1024*1024):.2f}MB")
+                        for chunk in chunks:
+                            if os.path.exists(chunk):
+                                os.remove(chunk)
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                        return []
+                    i += 1
+                else:
+                    break
+
+            segment_duration = time.time() - segment_start
+            memory_delta = get_memory_usage()['rss'] - segment_memory['rss']
+
+            log.info(
+                f"[SEGMENT] Created {len(chunks)} chunks, Total size: {total_chunk_size/(1024*1024):.1f}MB")
+            log.info(
+                f"[SEGMENT] FFmpeg time: {ffmpeg_duration:.2f}s, Total time: {segment_duration:.2f}s")
+            log.info(f"[SEGMENT] Memory delta: {memory_delta:+.1f}MB")
+
+            return chunks if chunks else []
+
+    except Exception as e:
+        log.debug(f"Segment muxer failed: {e}")
+        return []
+
+
+def split_audio_manual(file_path, base_name, max_bytes, format="mp3", bitrate="32k"):
+    """
+    Manual chunking for already compressed files.
+    """
+    chunks = []
+
+    try:
+        # Get duration
+        duration = get_audio_duration_ffmpeg(file_path)
+        if duration == 0:
+            log.error("Could not determine audio duration")
+            return [file_path]
+
+        # Get actual file size
+        file_size = os.path.getsize(file_path)
+        log.info(
+            f"Splitting compressed file: {file_size/(1024*1024):.1f}MB, duration: {duration:.1f}s")
+
+        # Since file is already compressed at 32kbps, calculate based on actual file metrics
+        bytes_per_second = file_size / duration
+        seconds_per_chunk = (max_bytes * 0.9) / bytes_per_second  # 90% of 20MB
+
+        # Calculate number of chunks needed
+        num_chunks = math.ceil(duration / seconds_per_chunk)
+        actual_chunk_duration = duration / num_chunks
+
+        log.info(
+            f"Creating {num_chunks} chunks of {actual_chunk_duration:.1f}s each")
+
+        # Process chunks
+        for i in range(num_chunks):
+            start_time = i * actual_chunk_duration
+            chunk_path = f"{base_name}_chunk_{i}.{format}"
+
+            # Use fast seek and copy codec (no re-encoding)
+            cmd = [
+                'ffmpeg',
+                '-ss', str(start_time),  # Fast seek
+                '-i', file_path,
+                '-t', str(actual_chunk_duration),
+                '-c', 'copy',  # Copy codec - no re-encoding
+                '-y',
+                chunk_path
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                chunk_size = os.path.getsize(chunk_path)
+                log.debug(
+                    f"Created chunk {i}: {chunk_size / (1024*1024):.2f}MB")
+
+                if chunk_size <= max_bytes:
+                    chunks.append(chunk_path)
+                else:
+                    # This shouldn't happen with proper calculation, but handle it
+                    os.remove(chunk_path)
+                    log.error(
+                        f"Chunk {i} unexpectedly large: {chunk_size / (1024*1024):.2f}MB")
+
+                    # Use shorter duration
+                    shorter_duration = actual_chunk_duration * \
+                        (max_bytes / chunk_size) * 0.9
+                    cmd[cmd.index('-t') + 1] = str(shorter_duration)
+
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True)
+                    if result.returncode == 0 and os.path.getsize(chunk_path) <= max_bytes:
+                        chunks.append(chunk_path)
+            else:
+                log.error(f"Failed to create chunk {i}: {result.stderr}")
+                # Clean up and return original
+                for chunk in chunks:
+                    if os.path.exists(chunk):
+                        os.remove(chunk)
+                return [file_path]
+
+        log.info(f"Successfully created {len(chunks)} chunks, all under 20MB")
+        return chunks
+
+    except Exception as e:
+        log.error(f"Error in manual splitting: {e}")
+        # Clean up
+        for chunk in chunks:
+            if os.path.exists(chunk):
+                os.remove(chunk)
+        return [file_path]
+
+
+def get_memory_usage():
+    """Get current memory usage of the process."""
+    try:
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        return {
+            'rss': memory_info.rss / (1024 * 1024),  # MB
+            'vms': memory_info.vms / (1024 * 1024),  # MB
+            'percent': process.memory_percent()
+        }
+    except:
+        return {'rss': 0, 'vms': 0, 'percent': 0}
+
+
+def log_performance(operation, start_time, start_memory):
+    """Log performance metrics for an operation."""
+    end_time = time.time()
+    end_memory = get_memory_usage()
+
+    duration = end_time - start_time
+    memory_delta = end_memory['rss'] - start_memory['rss']
+
+    log.info(f"[PERFORMANCE] {operation}:")
+    log.info(f"  - Duration: {duration:.2f} seconds")
+    log.info(
+        f"  - Memory: {start_memory['rss']:.1f}MB → {end_memory['rss']:.1f}MB (Δ {memory_delta:+.1f}MB)")
+    log.info(f"  - Memory %: {end_memory['percent']:.1f}%")
+
+
+def get_audio_duration_ffmpeg(file_path):
+    """Get audio duration using ffprobe without loading file into memory."""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+    except Exception as e:
+        log.error(f"ffprobe failed: {e}")
+
+    return 0
 
 
 @router.post("/transcriptions")
