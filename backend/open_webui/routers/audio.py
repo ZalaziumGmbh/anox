@@ -830,94 +830,120 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
     start_time = time.time()
     start_memory = get_memory_usage()
     original_size = os.path.getsize(file_path)
-
-    # Conversion if needed
-    if is_audio_conversion_required(file_path):
-        conversion_start = time.time()
-        file_path = convert_audio_to_mp3(file_path)
-        log.info(
-            f"[TIMING] Conversion took {time.time() - conversion_start:.2f}s")
-
-    # Compression
+    
+    # Track all files created during processing
+    original_file = file_path
+    files_to_cleanup = set()  # Use set to avoid duplicates
+    
     try:
+        # Step 1: Convert if needed
+        if is_audio_conversion_required(file_path):
+            conversion_start = time.time()
+            new_file = convert_audio_to_mp3(file_path)
+            files_to_cleanup.add(file_path)  # Add old file to cleanup
+            file_path = new_file
+            log.info(f"[TIMING] Conversion took {time.time() - conversion_start:.2f}s")
+
+        # Step 2: Compress
         compression_start = time.time()
-        file_path = compress_audio(file_path)
-        log.info(
-            f"[TIMING] Compression took {time.time() - compression_start:.2f}s")
-    except Exception as e:
-        log.exception(e)
+        compressed_file = compress_audio(file_path)
+        if compressed_file != file_path:
+            files_to_cleanup.add(file_path)  # Add uncompressed file to cleanup
+        file_path = compressed_file
+        log.info(f"[TIMING] Compression took {time.time() - compression_start:.2f}s")
 
-    # Always produce a list of chunk paths (could be one entry if small)
-    try:
+        # Step 3: Split into chunks
         split_start = time.time()
         chunk_paths = split_audio(file_path)
-        print(f"Chunk paths: {chunk_paths}")
-        log.info(
-            f"[TIMING] Splitting took {time.time() - split_start:.2f}s, created {len(chunk_paths)} chunks")
+        log.info(f"[TIMING] Splitting took {time.time() - split_start:.2f}s, created {len(chunk_paths)} chunks")
+        
+        # Add compressed file to cleanup if it's not one of the chunks
+        if file_path not in chunk_paths:
+            files_to_cleanup.add(file_path)
+
+        # Step 4: Transcribe chunks in parallel
+        transcription_start = time.time()
+        results = []
+        
+        with ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(transcription_handler, request, chunk_path, metadata)
+                for chunk_path in chunk_paths
+            ]
+            
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Error transcribing chunk: {e}",
+                    )
+
+        log.info(f"[TIMING] Transcription took {time.time() - transcription_start:.2f}s")
+        
+        # Combine results
+        combined_text = " ".join([result["text"] for result in results])
+        
+        # Success - clean up everything including original
+        cleanup_start = time.time()
+        files_to_cleanup.update(chunk_paths)  # Add all chunks
+        files_to_cleanup.add(original_file)    # Add original file
+        
+        cleanup_count = 0
+        for file_to_remove in files_to_cleanup:
+            if os.path.isfile(file_to_remove):
+                try:
+                    os.remove(file_to_remove)
+                    cleanup_count += 1
+                except Exception as e:
+                    log.warning(f"Failed to remove {file_to_remove}: {e}")
+        
+        log.info(f"[TIMING] Cleanup took {time.time() - cleanup_start:.2f}s, removed {cleanup_count} files")
+        
+        # Log final metrics
+        total_time = time.time() - start_time
+        end_memory = get_memory_usage()
+        memory_delta = end_memory['rss'] - start_memory['rss']
+
+        log.info(f"[METRICS] Total time: {total_time:.2f}s")
+        log.info(f"[METRICS] Original size: {original_size/(1024*1024):.1f}MB")
+        log.info(f"[METRICS] Processing speed: {original_size/(1024*1024)/total_time:.2f} MB/s")
+        log.info(f"[METRICS] Memory used: {memory_delta:+.1f}MB")
+        log.info(f"[METRICS] Words transcribed: {len(combined_text.split())}")
+
+        return {"text": combined_text}
+        
     except Exception as e:
-        log.exception(e)
+        # On error, only clean up temporary files (not original)
+        cleanup_count = 0
+        for file_to_remove in files_to_cleanup:
+            if os.path.isfile(file_to_remove):
+                try:
+                    os.remove(file_to_remove)
+                    cleanup_count += 1
+                except Exception:
+                    pass
+                                   
+        # Also clean up chunks if they exist
+        if 'chunk_paths' in locals():
+            for chunk in chunk_paths:
+                if os.path.isfile(chunk):
+                    try:
+                        os.remove(chunk)
+                        cleanup_count += 1
+                    except Exception:
+                        pass
+        
+        log.info(f"[ERROR CLEANUP] Removed {cleanup_count} temporary files, kept original")
+        
+        # Re-raise the original exception
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(e),
         )
-
-    results = []
-    transcription_start = time.time()
-
-    try:
-        with ThreadPoolExecutor() as executor:
-            # Submit tasks for each chunk_path
-            futures = [
-                executor.submit(transcription_handler,
-                                request, chunk_path, metadata)
-                for chunk_path in chunk_paths
-            ]
-            # Gather results as they complete
-            for future in futures:
-                try:
-                    results.append(future.result())
-                except Exception as transcribe_exc:
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"Error transcribing chunk: {transcribe_exc}",
-                    )
-
-        log.info(
-            f"[TIMING] Transcription took {time.time() - transcription_start:.2f}s")
-
-    finally:
-        # Clean up only the temporary chunks, never the original file
-        cleanup_start = time.time()
-        cleanup_count = 0
-
-        for chunk_path in chunk_paths:
-            if chunk_path != file_path and os.path.isfile(chunk_path):
-                try:
-                    os.remove(chunk_path)
-                    cleanup_count += 1
-                except Exception:
-                    pass
-
-        log.info(
-            f"[TIMING] Cleanup took {time.time() - cleanup_start:.2f}s, removed {cleanup_count} files")
-
-    # Final metrics
-    total_time = time.time() - start_time
-    end_memory = get_memory_usage()
-    memory_delta = end_memory['rss'] - start_memory['rss']
-
-    combined_text = " ".join([result["text"] for result in results])
-
-    log.info(f"[METRICS] Total time: {total_time:.2f}s")
-    log.info(f"[METRICS] Original size: {original_size/(1024*1024):.1f}MB")
-    log.info(
-        f"[METRICS] Processing speed: {original_size/(1024*1024)/total_time:.2f} MB/s")
-    log.info(f"[METRICS] Memory used: {memory_delta:+.1f}MB")
-    log.info(f"[METRICS] Words transcribed: {len(combined_text.split())}")
-
-    return {
-        "text": combined_text,
-    }
 
 
 def compress_audio(file_path):
