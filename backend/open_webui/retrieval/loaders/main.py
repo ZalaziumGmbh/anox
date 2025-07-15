@@ -19,6 +19,7 @@ from langchain_community.document_loaders import (
     UnstructuredRSTLoader,
     UnstructuredXMLLoader,
     YoutubeLoader,
+    UnstructuredPDFLoader
 )
 from langchain_core.documents import Document
 
@@ -214,15 +215,38 @@ class Loader:
     def load(
         self, filename: str, file_content_type: str, file_path: str
     ) -> list[Document]:
+        file_extension = filename.split(".")[-1].lower()
         loader = self._get_loader(filename, file_content_type, file_path)
         docs = loader.load()
 
+        if file_extension == "pdf":
+            docs = self._ensure_pdf_content(loader, docs, file_path, filename)
         return [
             Document(
                 page_content=ftfy.fix_text(doc.page_content), metadata=doc.metadata
             )
             for doc in docs
         ]
+
+    def _ensure_pdf_content(self, loader, docs, file_path, filename,):
+        
+        if docs and any(doc.page_content.strip() for doc in docs):
+            return docs
+
+        log.warning(f"PyMuPDFLoader returned empty or invalid content for {filename}")
+        if not isinstance(loader, UnstructuredPDFLoader):
+            extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES", True)
+            fallback_loader = UnstructuredPDFLoader(file_path, extract_images=extract_images)
+            try:
+                fallback_docs = fallback_loader.load()
+                if fallback_docs and any(doc.page_content.strip() for doc in fallback_docs):
+                    return fallback_docs
+                log.error(f"UnstructuredPDFLoader also returned empty content for {filename}")
+                raise Exception("No content extracted from PDF")
+            except Exception as e:
+                log.error(f"UnstructuredPDFLoader failed for {filename}: {e}")
+                raise e
+        return docs
 
     def _is_text_file(self, file_ext: str, file_content_type: str) -> bool:
         return file_ext in known_source_ext or (
