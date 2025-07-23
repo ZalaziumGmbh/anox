@@ -34,8 +34,19 @@ async def get_groups(user=Depends(get_verified_user)):
     if user.role == "admin":
         return Groups.get_groups()
     else:
-        return Groups.get_groups_by_member_id(user.id)
-
+        member_groups = Groups.get_groups_by_member_id(user.id)
+        
+        group_prefixes = {grp.name.split('.')[0] for grp in member_groups if '.' in grp.name}
+        
+        if group_prefixes:
+            result_groups = []
+            for prefix in group_prefixes:
+                prefix_groups = Groups.get_groups_by_prefix(prefix)
+                result_groups.extend(prefix_groups)
+    
+            return result_groups
+        
+        return member_groups
 
 ############################
 # CreateNewGroup
