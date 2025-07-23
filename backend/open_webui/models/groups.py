@@ -210,6 +210,14 @@ class GroupTable:
                 return True
             except Exception:
                 return False
+            
+    def get_groups_by_prefix(self, prefix: str) -> list[GroupModel]:
+        with get_db() as db:
+            query = (db.query(Group)
+                       .filter(Group.name.like(f"{prefix}.%"))
+                       .order_by(Group.updated_at.desc())
+                       .all())
+            return [GroupModel.model_validate(g) for g in query]
 
     def create_groups_by_group_names(
         self, user_id: str, group_names: list[str]
