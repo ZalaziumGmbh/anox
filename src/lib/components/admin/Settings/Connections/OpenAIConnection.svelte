@@ -98,7 +98,6 @@
 			<SensitiveInput
 				inputClassName=" outline-hidden bg-transparent w-full"
 				placeholder={$i18n.t('API Key')}
-				required={false}
 				bind:value={key}
 			/>
 		</div>

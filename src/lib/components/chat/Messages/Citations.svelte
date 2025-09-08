@@ -18,13 +18,6 @@
 	let selectedCitation: any = null;
 	let isCollapsibleOpen = false;
 
-	export const showSourceModal = (sourceIdx) => {
-		if (citations[sourceIdx]) {
-			selectedCitation = citations[sourceIdx];
-			showCitationModal = true;
-		}
-	};
-
 	function calculateShowRelevance(sources: any[]) {
 		const distances = sources.flatMap((citation) => citation.distances ?? []);
 		const inRange = distances.filter((d) => d !== undefined && d >= -1 && d <= 1).length;
@@ -50,6 +43,7 @@
 	}
 
 	$: {
+		console.log('sources', sources);
 		citations = sources.reduce((acc, source) => {
 			if (Object.keys(source).length === 0) {
 				return acc;

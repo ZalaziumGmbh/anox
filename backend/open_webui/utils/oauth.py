@@ -27,7 +27,6 @@ from open_webui.config import (
     ENABLE_OAUTH_GROUP_CREATION,
     OAUTH_BLOCKED_GROUPS,
     OAUTH_ROLES_CLAIM,
-    OAUTH_SUB_CLAIM,
     OAUTH_GROUPS_CLAIM,
     OAUTH_EMAIL_CLAIM,
     OAUTH_PICTURE_CLAIM,
@@ -66,7 +65,6 @@ auth_manager_config.ENABLE_OAUTH_GROUP_MANAGEMENT = ENABLE_OAUTH_GROUP_MANAGEMEN
 auth_manager_config.ENABLE_OAUTH_GROUP_CREATION = ENABLE_OAUTH_GROUP_CREATION
 auth_manager_config.OAUTH_BLOCKED_GROUPS = OAUTH_BLOCKED_GROUPS
 auth_manager_config.OAUTH_ROLES_CLAIM = OAUTH_ROLES_CLAIM
-auth_manager_config.OAUTH_SUB_CLAIM = OAUTH_SUB_CLAIM
 auth_manager_config.OAUTH_GROUPS_CLAIM = OAUTH_GROUPS_CLAIM
 auth_manager_config.OAUTH_EMAIL_CLAIM = OAUTH_EMAIL_CLAIM
 auth_manager_config.OAUTH_PICTURE_CLAIM = OAUTH_PICTURE_CLAIM
@@ -90,12 +88,11 @@ class OAuthManager:
         return self.oauth.create_client(provider_name)
 
     def get_user_role(self, user, user_data):
-        user_count = Users.get_num_users()
-        if user and user_count == 1:
+        if user and Users.get_num_users() == 1:
             # If the user is the only user, assign the role "admin" - actually repairs role for single user on login
             log.debug("Assigning the only user the admin role")
             return "admin"
-        if not user and user_count == 0:
+        if not user and Users.get_num_users() == 0:
             # If there are no users, assign the role "admin", as the first user will be an admin
             log.debug("Assigning the first user the admin role")
             return "admin"
@@ -115,13 +112,7 @@ class OAuthManager:
                 nested_claims = oauth_claim.split(".")
                 for nested_claim in nested_claims:
                     claim_data = claim_data.get(nested_claim, {})
-
-                oauth_roles = []
-
-                if isinstance(claim_data, list):
-                    oauth_roles = claim_data
-                if isinstance(claim_data, str) or isinstance(claim_data, int):
-                    oauth_roles = [str(claim_data)]
+                oauth_roles = claim_data if isinstance(claim_data, list) else []
 
             log.debug(f"Oauth Roles claim: {oauth_claim}")
             log.debug(f"User roles from oauth: {oauth_roles}")
@@ -361,28 +352,17 @@ class OAuthManager:
             log.warning(f"OAuth callback error: {e}")
             raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
         user_data: UserInfo = token.get("userinfo")
-        if (
-            (not user_data)
-            or (auth_manager_config.OAUTH_EMAIL_CLAIM not in user_data)
-            or (auth_manager_config.OAUTH_USERNAME_CLAIM not in user_data)
-        ):
+        if not user_data or auth_manager_config.OAUTH_EMAIL_CLAIM not in user_data:
             user_data: UserInfo = await client.userinfo(token=token)
         if not user_data:
             log.warning(f"OAuth callback failed, user data is missing: {token}")
             raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
 
-        if auth_manager_config.OAUTH_SUB_CLAIM:
-            sub = user_data.get(auth_manager_config.OAUTH_SUB_CLAIM)
-        else:
-            # Fallback to the default sub claim if not configured
-            sub = user_data.get(OAUTH_PROVIDERS[provider].get("sub_claim", "sub"))
-
+        sub = user_data.get(OAUTH_PROVIDERS[provider].get("sub_claim", "sub"))
         if not sub:
             log.warning(f"OAuth callback failed, sub is missing: {user_data}")
             raise HTTPException(400, detail=ERROR_MESSAGES.INVALID_CRED)
-
         provider_sub = f"{provider}@{sub}"
-
         email_claim = auth_manager_config.OAUTH_EMAIL_CLAIM
         email = user_data.get(email_claim, "")
         # We currently mandate that email addresses are provided
@@ -469,6 +449,8 @@ class OAuthManager:
                         log.debug(f"Updated profile picture for user {user.email}")
 
         if not user:
+            user_count = Users.get_num_users()
+
             # If the user does not exist, check if signups are enabled
             if auth_manager_config.ENABLE_OAUTH_SIGNUP:
                 # Check if an existing user with the same email already exists
@@ -508,7 +490,7 @@ class OAuthManager:
                 )
 
                 if auth_manager_config.WEBHOOK_URL:
-                    await post_webhook(
+                    post_webhook(
                         WEBUI_NAME,
                         auth_manager_config.WEBHOOK_URL,
                         WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
@@ -535,19 +517,11 @@ class OAuthManager:
                 default_permissions=request.app.state.config.USER_PERMISSIONS,
             )
 
-        redirect_base_url = str(request.app.state.config.WEBUI_URL or request.base_url)
-        if redirect_base_url.endswith("/"):
-            redirect_base_url = redirect_base_url[:-1]
-        redirect_url = f"{redirect_base_url}/auth"
-
-        response = RedirectResponse(url=redirect_url, headers=response.headers)
-
         # Set the cookie token
-        # Redirect back to the frontend with the JWT token
         response.set_cookie(
             key="token",
             value=jwt_token,
-            httponly=False,  # Required for frontend access
+            httponly=True,  # Ensures the cookie is not accessible via JavaScript
             samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
             secure=WEBUI_AUTH_COOKIE_SECURE,
         )
@@ -561,4 +535,11 @@ class OAuthManager:
                 samesite=WEBUI_AUTH_COOKIE_SAME_SITE,
                 secure=WEBUI_AUTH_COOKIE_SECURE,
             )
-        return response
+        # Redirect back to the frontend with the JWT token
+
+        redirect_base_url = str(request.app.state.config.WEBUI_URL or request.base_url)
+        if redirect_base_url.endswith("/"):
+            redirect_base_url = redirect_base_url[:-1]
+        redirect_url = f"{redirect_base_url}/auth#token={jwt_token}"
+
+        return RedirectResponse(url=redirect_url, headers=response.headers)

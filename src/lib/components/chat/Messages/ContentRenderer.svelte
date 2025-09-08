@@ -17,27 +17,22 @@
 
 	export let id;
 	export let content;
-
 	export let history;
-	export let messageId;
-
-	export let selectedModels = [];
-
-	export let done = true;
 	export let model = null;
 	export let sources = null;
 
 	export let save = false;
 	export let preview = false;
 	export let floatingButtons = true;
-	export let topPadding = false;
 
-	export let onSave = (e) => {};
-	export let onSourceClick = (e) => {};
-	export let onTaskClick = (e) => {};
-	export let onAddMessages = (e) => {};
+	export let onSave = () => {};
+	export let onSourceClick = () => {};
+	export let onTaskClick = () => {};
+
+	export let onAddMessages = () => {};
 
 	let contentContainerElement;
+
 	let floatingButtonsElement;
 
 	const updateButtonPosition = (event) => {
@@ -137,17 +132,15 @@
 		{model}
 		{save}
 		{preview}
-		{done}
-		{topPadding}
-		sourceIds={(sources ?? []).reduce((acc, source) => {
+		sourceIds={(sources ?? []).reduce((acc, s) => {
 			let ids = [];
-			source.document.forEach((document, index) => {
+			s.document.forEach((document, index) => {
 				if (model?.info?.meta?.capabilities?.citations == false) {
 					ids.push('N/A');
 					return ids;
 				}
 
-				const metadata = source.metadata?.[index];
+				const metadata = s.metadata?.[index];
 				const id = metadata?.source ?? 'N/A';
 
 				if (metadata?.name) {
@@ -158,7 +151,7 @@
 				if (id.startsWith('http://') || id.startsWith('https://')) {
 					ids.push(id);
 				} else {
-					ids.push(source?.source?.name ?? id);
+					ids.push(s?.source?.name ?? id);
 				}
 
 				return ids;
@@ -199,13 +192,7 @@
 	<FloatingButtons
 		bind:this={floatingButtonsElement}
 		{id}
-		{messageId}
-		actions={$settings?.floatingActionButtons ?? []}
-		model={(selectedModels ?? []).includes(model?.id)
-			? model?.id
-			: (selectedModels ?? []).length > 0
-				? selectedModels.at(0)
-				: model?.id}
+		model={model?.id}
 		messages={createMessagesList(history, id)}
 		onAdd={({ modelId, parentId, messages }) => {
 			console.log(modelId, parentId, messages);

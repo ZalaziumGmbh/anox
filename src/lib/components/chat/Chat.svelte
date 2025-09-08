@@ -36,15 +36,18 @@
 		chatTitle,
 		showArtifacts,
 		tools,
-		toolServers,
-		selectedFolder,
-		pinnedChats
+		toolServers
 	} from '$lib/stores';
 	import {
 		convertMessagesToHistory,
 		copyToClipboard,
 		getMessageContentParts,
 		createMessagesList,
+		extractSentencesForAudio,
+		promptTemplate,
+		splitStream,
+		sleep,
+		removeDetails,
 		getPromptVariables,
 		processDetails,
 		removeAllDetails
@@ -52,14 +55,15 @@
 
 	import { generateChatCompletion } from '$lib/apis/ollama';
 	import {
+		addTagById,
 		createNewChat,
+		deleteTagById,
+		deleteTagsById,
 		getAllTags,
 		getChatById,
 		getChatList,
-		getPinnedChatList,
 		getTagsById,
-		updateChatById,
-		updateChatFolderIdById
+		updateChatById
 	} from '$lib/apis/chats';
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
@@ -86,9 +90,6 @@
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import { fade } from 'svelte/transition';
-	import Tooltip from '../common/Tooltip.svelte';
-	import Sidebar from '../icons/Sidebar.svelte';
-	import { uploadFile } from '$lib/apis/files';
 
 	export let chatIdProp = '';
 
@@ -97,8 +98,6 @@
 	const eventTarget = new EventTarget();
 	let controlPane;
 	let controlPaneComponent;
-
-	let messageInput;
 
 	let autoScroll = true;
 	let processing = '';
@@ -127,11 +126,6 @@
 	let webSearchEnabled = false;
 	let codeInterpreterEnabled = false;
 
-	let showCommands = false;
-
-	let generating = false;
-	let generationController = null;
-
 	let chat = null;
 	let tags = [];
 
@@ -149,38 +143,24 @@
 	let params = {};
 
 	$: if (chatIdProp) {
-		navigateHandler();
-	}
+		(async () => {
+			loading = true;
 
-	const navigateHandler = async () => {
-		loading = true;
+			prompt = '';
+			files = [];
+			selectedToolIds = [];
+			selectedFilterIds = [];
+			webSearchEnabled = false;
+			imageGenerationEnabled = false;
 
-		prompt = '';
-		messageInput?.setText('');
-
-		files = [];
-		selectedToolIds = [];
-		selectedFilterIds = [];
-		webSearchEnabled = false;
-		imageGenerationEnabled = false;
-
-		const storageChatInput = sessionStorage.getItem(
-			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
-		);
-
-		if (chatIdProp && (await loadChat())) {
-			await tick();
-			loading = false;
-			window.setTimeout(() => scrollToBottom(), 0);
-
-			await tick();
-
-			if (storageChatInput) {
+			if (localStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`)) {
 				try {
-					const input = JSON.parse(storageChatInput);
+					const input = JSON.parse(
+						localStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`)
+					);
 
 					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
+						prompt = input.prompt;
 						files = input.files;
 						selectedToolIds = input.selectedToolIds;
 						selectedFilterIds = input.selectedFilterIds;
@@ -191,21 +171,17 @@
 				} catch (e) {}
 			}
 
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		} else {
-			await goto('/');
-		}
-	};
-
-	const onSelect = async (e) => {
-		const { type, data } = e;
-
-		if (type === 'prompt') {
-			// Handle prompt selection
-			messageInput?.setText(data);
-		}
-	};
+			if (chatIdProp && (await loadChat())) {
+				await tick();
+				loading = false;
+				window.setTimeout(() => scrollToBottom(), 0);
+				const chatInput = document.getElementById('chat-input');
+				chatInput?.focus();
+			} else {
+				await goto('/');
+			}
+		})();
+	}
 
 	$: if (selectedModels && chatIdProp !== '') {
 		saveSessionSelectedModels();
@@ -432,7 +408,7 @@
 			const inputElement = document.getElementById('chat-input');
 
 			if (inputElement) {
-				messageInput?.setText(event.data.text);
+				prompt = event.data.text;
 				inputElement.focus();
 			}
 		}
@@ -470,19 +446,8 @@
 			}
 		});
 
-		const storageChatInput = sessionStorage.getItem(
-			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
-		);
-
-		if (!chatIdProp) {
-			loading = false;
-			await tick();
-		}
-
-		if (storageChatInput) {
+		if (localStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`)) {
 			prompt = '';
-			messageInput?.setText('');
-
 			files = [];
 			selectedToolIds = [];
 			selectedFilterIds = [];
@@ -491,10 +456,12 @@
 			codeInterpreterEnabled = false;
 
 			try {
-				const input = JSON.parse(storageChatInput);
+				const input = JSON.parse(
+					localStorage.getItem(`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`)
+				);
 
 				if (!$temporaryChatEnabled) {
-					messageInput?.setText(input.prompt);
+					prompt = input.prompt;
 					files = input.files;
 					selectedToolIds = input.selectedToolIds;
 					selectedFilterIds = input.selectedFilterIds;
@@ -503,6 +470,11 @@
 					codeInterpreterEnabled = input.codeInterpreterEnabled;
 				}
 			} catch (e) {}
+		}
+
+		if (!chatIdProp) {
+			loading = false;
+			await tick();
 		}
 
 		showControls.subscribe(async (value) => {
@@ -736,19 +708,6 @@
 	//////////////////////////
 
 	const initNewChat = async () => {
-		if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
-			await temporaryChatEnabled.set(true);
-		}
-
-		if ($settings?.temporaryChatByDefault ?? false) {
-			if ($temporaryChatEnabled === false) {
-				await temporaryChatEnabled.set(true);
-			} else if ($temporaryChatEnabled === null) {
-				// if set to null set to false; refer to temp chat toggle click handler
-				await temporaryChatEnabled.set(false);
-			}
-		}
-
 		const availableModels = $models
 			.filter((m) => !(m?.info?.meta?.hidden ?? false))
 			.map((m) => m.id);
@@ -873,14 +832,11 @@
 		}
 
 		if ($page.url.searchParams.get('q')) {
-			const q = $page.url.searchParams.get('q') ?? '';
-			messageInput?.setText(q);
+			prompt = $page.url.searchParams.get('q') ?? '';
 
-			if (q) {
-				if (($page.url.searchParams.get('submit') ?? 'true') === 'true') {
-					await tick();
-					submitPrompt(q);
-				}
+			if (prompt) {
+				await tick();
+				submitPrompt(prompt);
 			}
 		}
 
@@ -1112,7 +1068,7 @@
 	};
 
 	const createMessagePair = async (userPrompt) => {
-		messageInput?.setText('');
+		prompt = '';
 		if (selectedModels.length === 0) {
 			toast.error($i18n.t('Model not selected'));
 		} else {
@@ -1241,7 +1197,7 @@
 			await handleOpenAIError(error, message);
 		}
 
-		if (sources && !message?.sources) {
+		if (sources) {
 			message.sources = sources;
 		}
 
@@ -1365,12 +1321,6 @@
 			);
 
 			history.messages[message.id] = message;
-
-			await tick();
-			if (autoScroll) {
-				scrollToBottom();
-			}
-
 			await chatCompletedHandler(
 				chatId,
 				message.model,
@@ -1380,8 +1330,6 @@
 		}
 
 		console.log(data);
-		await tick();
-
 		if (autoScroll) {
 			scrollToBottom();
 		}
@@ -1441,7 +1389,6 @@
 			return;
 		}
 
-		messageInput?.setText('');
 		prompt = '';
 
 		// Reset chat input textarea
@@ -1463,7 +1410,7 @@
 		);
 
 		files = [];
-		messageInput?.setText('');
+		prompt = '';
 
 		// Create user message
 		let userMessageId = uuidv4();
@@ -1493,23 +1440,14 @@
 
 		saveSessionSelectedModels();
 
-		await sendMessage(history, userMessageId, { newChat: true });
+		await sendPrompt(history, userPrompt, userMessageId, { newChat: true });
 	};
 
-	const sendMessage = async (
+	const sendPrompt = async (
 		_history,
+		prompt: string,
 		parentId: string,
-		{
-			messages = null,
-			modelId = null,
-			modelIdx = null,
-			newChat = false
-		}: {
-			messages?: any[] | null;
-			modelId?: string | null;
-			modelIdx?: number | null;
-			newChat?: boolean;
-		} = {}
+		{ modelId = null, modelIdx = null, newChat = false } = {}
 	) => {
 		if (autoScroll) {
 			scrollToBottom();
@@ -1579,8 +1517,9 @@
 				const model = $models.filter((m) => m.id === modelId).at(0);
 
 				if (model) {
+					const messages = createMessagesList(_history, parentId);
 					// If there are image files, check if model is vision capable
-					const hasImages = createMessagesList(_history, parentId).some((message) =>
+					const hasImages = messages.some((message) =>
 						message.files?.some((file) => file.type === 'image')
 					);
 
@@ -1597,15 +1536,7 @@
 					const chatEventEmitter = await getChatEventEmitter(model.id, _chatId);
 
 					scrollToBottom();
-					await sendMessageSocket(
-						model,
-						messages && messages.length > 0
-							? messages
-							: createMessagesList(_history, responseMessageId),
-						_history,
-						responseMessageId,
-						_chatId
-					);
+					await sendPromptSocket(_history, model, responseMessageId, _chatId);
 
 					if (chatEventEmitter) clearInterval(chatEventEmitter);
 				} else {
@@ -1618,11 +1549,12 @@
 		chats.set(await getChatList(localStorage.token, $currentChatPage));
 	};
 
-	const sendMessageSocket = async (model, _messages, _history, responseMessageId, _chatId) => {
+	const sendPromptSocket = async (_history, model, responseMessageId, _chatId) => {
+		const chatMessages = createMessagesList(history, history.currentId);
 		const responseMessage = _history.messages[responseMessageId];
 		const userMessage = _history.messages[responseMessage.parentId];
 
-		const chatMessageFiles = _messages
+		const chatMessageFiles = chatMessages
 			.filter((message) => message.files)
 			.flatMap((message) => message.files);
 
@@ -1635,8 +1567,9 @@
 		let files = JSON.parse(JSON.stringify(chatFiles));
 		files.push(
 			...(userMessage?.files ?? []).filter((item) =>
-				['doc', 'text', 'file', 'note', 'collection'].includes(item.type)
-			)
+				['doc', 'file', 'collection'].includes(item.type)
+			),
+			...(responseMessage?.files ?? []).filter((item) => ['web_search_results'].includes(item.type))
 		);
 		// Remove duplicates
 		files = files.filter(
@@ -1654,14 +1587,6 @@
 		);
 		await tick();
 
-		let userLocation;
-		if ($settings?.userLocation) {
-			userLocation = await getAndUpdateUserLocation(localStorage.token).catch((err) => {
-				console.error(err);
-				return undefined;
-			});
-		}
-
 		const stream =
 			model?.info?.params?.stream_response ??
 			$settings?.params?.stream_response ??
@@ -1672,10 +1597,19 @@
 			params?.system || $settings.system
 				? {
 						role: 'system',
-						content: `${params?.system ?? $settings?.system ?? ''}`
+						content: `${promptTemplate(
+							params?.system ?? $settings?.system ?? '',
+							$user?.name,
+							$settings?.userLocation
+								? await getAndUpdateUserLocation(localStorage.token).catch((err) => {
+										console.error(err);
+										return undefined;
+									})
+								: undefined
+						)}`
 					}
 				: undefined,
-			..._messages.map((message) => ({
+			...createMessagesList(_history, responseMessageId).map((message) => ({
 				...message,
 				content: processDetails(message.content)
 			}))
@@ -1750,7 +1684,15 @@
 					memory: $settings?.memory ?? false
 				},
 				variables: {
-					...getPromptVariables($user?.name, $settings?.userLocation ? userLocation : undefined)
+					...getPromptVariables(
+						$user?.name,
+						$settings?.userLocation
+							? await getAndUpdateUserLocation(localStorage.token).catch((err) => {
+									console.error(err);
+									return undefined;
+								})
+							: undefined
+					)
 				},
 				model_item: $models.find((m) => m.id === model.id),
 
@@ -1783,24 +1725,11 @@
 			},
 			`${WEBUI_BASE_URL}/api`
 		).catch(async (error) => {
-			console.log(error);
+			toast.error(`${error}`);
 
-			let errorMessage = error;
-			if (error?.error?.message) {
-				errorMessage = error.error.message;
-			} else if (error?.message) {
-				errorMessage = error.message;
-			}
-
-			if (typeof errorMessage === 'object') {
-				errorMessage = $i18n.t(`Uh-oh! There was an issue with the response.`);
-			}
-
-			toast.error(`${errorMessage}`);
 			responseMessage.error = {
 				content: error
 			};
-
 			responseMessage.done = true;
 
 			history.messages[responseMessageId] = responseMessage;
@@ -1890,12 +1819,6 @@
 				scrollToBottom();
 			}
 		}
-
-		if (generating) {
-			generating = false;
-			generationController?.abort();
-			generationController = null;
-		}
 	};
 
 	const submitMessage = async (parentId, prompt) => {
@@ -1928,39 +1851,31 @@
 			scrollToBottom();
 		}
 
-		await sendMessage(history, userMessageId);
+		await sendPrompt(history, userPrompt, userMessageId);
 	};
 
-	const regenerateResponse = async (message, suggestionPrompt = null) => {
+	const regenerateResponse = async (message) => {
 		console.log('regenerateResponse');
 
 		if (history.currentId) {
 			let userMessage = history.messages[message.parentId];
+			let userPrompt = userMessage.content;
 
 			if (autoScroll) {
 				scrollToBottom();
 			}
 
-			await sendMessage(history, userMessage.id, {
-				...(suggestionPrompt
-					? {
-							messages: [
-								...createMessagesList(history, message.id),
-								{
-									role: 'user',
-									content: suggestionPrompt
-								}
-							]
-						}
-					: {}),
-				...((userMessage?.models ?? [...selectedModels]).length > 1
-					? {
-							// If multiple models are selected, use the model from the message
-							modelId: message.model,
-							modelIdx: message.modelIdx
-						}
-					: {})
-			});
+			if ((userMessage?.models ?? [...selectedModels]).length == 1) {
+				// If user message has only one model selected, sendPrompt automatically selects it for regeneration
+				await sendPrompt(history, userPrompt, userMessage.id);
+			} else {
+				// If there are multiple models selected, use the model of the response message for regeneration
+				// e.g. many model chat
+				await sendPrompt(history, userPrompt, userMessage.id, {
+					modelId: message.model,
+					modelIdx: message.modelIdx
+				});
+			}
 		}
 	};
 
@@ -1978,13 +1893,7 @@
 				.at(0);
 
 			if (model) {
-				await sendMessageSocket(
-					model,
-					createMessagesList(history, responseMessage.id),
-					history,
-					responseMessage.id,
-					_chatId
-				);
+				await sendPromptSocket(history, model, responseMessage.id, _chatId);
 			}
 		}
 	};
@@ -2000,7 +1909,6 @@
 		history.messages[messageId] = message;
 
 		try {
-			generating = true;
 			const [res, controller] = await generateMoACompletion(
 				localStorage.token,
 				message.model,
@@ -2008,14 +1916,11 @@
 				responses
 			);
 
-			if (res && res.ok && res.body && generating) {
-				generationController = controller;
+			if (res && res.ok && res.body) {
 				const textStream = await createOpenAITextStream(res.body, $settings.splitLargeChunks);
 				for await (const update of textStream) {
 					const { value, done, sources, error, usage } = update;
 					if (error || done) {
-						generating = false;
-						generationController = null;
 						break;
 					}
 
@@ -2044,33 +1949,25 @@
 		let _chatId = $chatId;
 
 		if (!$temporaryChatEnabled) {
-			chat = await createNewChat(
-				localStorage.token,
-				{
-					id: _chatId,
-					title: $i18n.t('New Chat'),
-					models: selectedModels,
-					system: $settings.system ?? undefined,
-					params: params,
-					history: history,
-					messages: createMessagesList(history, history.currentId),
-					tags: [],
-					timestamp: Date.now()
-				},
-				$selectedFolder?.id
-			);
+			chat = await createNewChat(localStorage.token, {
+				id: _chatId,
+				title: $i18n.t('New Chat'),
+				models: selectedModels,
+				system: $settings.system ?? undefined,
+				params: params,
+				history: history,
+				messages: createMessagesList(history, history.currentId),
+				tags: [],
+				timestamp: Date.now()
+			});
 
 			_chatId = chat.id;
 			await chatId.set(_chatId);
 
-			window.history.replaceState(history.state, '', `/c/${_chatId}`);
-
-			await tick();
-
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			currentChatPage.set(1);
 
-			selectedFolder.set(null);
+			window.history.replaceState(history.state, '', `/c/${_chatId}`);
 		} else {
 			_chatId = 'local';
 			await chatId.set('local');
@@ -2093,54 +1990,6 @@
 				currentChatPage.set(1);
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			}
-		}
-	};
-
-	const MAX_DRAFT_LENGTH = 5000;
-	let saveDraftTimeout = null;
-
-	const saveDraft = async (draft, chatId = null) => {
-		if (saveDraftTimeout) {
-			clearTimeout(saveDraftTimeout);
-		}
-
-		if (draft.prompt !== null && draft.prompt.length < MAX_DRAFT_LENGTH) {
-			saveDraftTimeout = setTimeout(async () => {
-				await sessionStorage.setItem(
-					`chat-input${chatId ? `-${chatId}` : ''}`,
-					JSON.stringify(draft)
-				);
-			}, 500);
-		} else {
-			sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
-		}
-	};
-
-	const clearDraft = async (chatId = null) => {
-		if (saveDraftTimeout) {
-			clearTimeout(saveDraftTimeout);
-		}
-		await sessionStorage.removeItem(`chat-input${chatId ? `-${chatId}` : ''}`);
-	};
-
-	const moveChatHandler = async (chatId, folderId) => {
-		if (chatId && folderId) {
-			const res = await updateChatFolderIdById(localStorage.token, chatId, folderId).catch(
-				(error) => {
-					toast.error(`${error}`);
-					return null;
-				}
-			);
-
-			if (res) {
-				currentChatPage.set(1);
-				await chats.set(await getChatList(localStorage.token, $currentChatPage));
-				await pinnedChats.set(await getPinnedChatList(localStorage.token));
-
-				toast.success($i18n.t('Chat moved successfully'));
-			}
-		} else {
-			toast.error($i18n.t('Failed to move chat'));
 		}
 	};
 </script>
@@ -2182,13 +2031,12 @@
 >
 	{#if !loading}
 		<div in:fade={{ duration: 50 }} class="w-full h-full flex flex-col">
-			{#if $settings?.backgroundImageUrl ?? $config?.license_metadata?.background_image_url ?? null}
+			{#if $settings?.backgroundImageUrl ?? null}
 				<div
 					class="absolute {$showSidebar
 						? 'md:max-w-[calc(100%-260px)] md:translate-x-[260px]'
 						: ''} top-0 left-0 w-full h-full bg-cover bg-center bg-no-repeat"
-					style="background-image: url({$settings?.backgroundImageUrl ??
-						$config?.license_metadata?.background_image_url})  "
+					style="background-image: url({$settings.backgroundImageUrl})  "
 				/>
 
 				<div
@@ -2216,49 +2064,10 @@
 						bind:selectedModels
 						shareEnabled={!!history.currentId}
 						{initNewChat}
-						showBanners={!showCommands}
-						archiveChatHandler={() => {}}
-						{moveChatHandler}
-						onSaveTempChat={async () => {
-							try {
-								if (!history?.currentId || !Object.keys(history.messages).length) {
-									toast.error($i18n.t('No conversation to save'));
-									return;
-								}
-								const messages = createMessagesList(history, history.currentId);
-								const title =
-									messages.find((m) => m.role === 'user')?.content ?? $i18n.t('New Chat');
-
-								const savedChat = await createNewChat(
-									localStorage.token,
-									{
-										id: uuidv4(),
-										title: title.length > 50 ? `${title.slice(0, 50)}...` : title,
-										models: selectedModels,
-										history: history,
-										messages: messages,
-										timestamp: Date.now()
-									},
-									null
-								);
-
-								if (savedChat) {
-									temporaryChatEnabled.set(false);
-									chatId.set(savedChat.id);
-									chats.set(await getChatList(localStorage.token, $currentChatPage));
-
-									await goto(`/c/${savedChat.id}`);
-									toast.success($i18n.t('Conversation saved successfully'));
-								}
-							} catch (error) {
-								console.error('Error saving conversation:', error);
-								toast.error($i18n.t('Failed to save conversation'));
-							}
-						}}
 					/>
 
-					<div class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
-						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
+					<div class="flex flex-col flex-auto z-10 w-full @container">
+						{#if $settings?.landingPageMode === 'chat' || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
 								id="messages-container"
@@ -2275,12 +2084,9 @@
 										bind:history
 										bind:autoScroll
 										bind:prompt
-										setInputText={(text) => {
-											messageInput?.setText(text);
-										}}
 										{selectedModels}
 										{atSelectedModel}
-										{sendMessage}
+										{sendPrompt}
 										{showMessage}
 										{submitMessage}
 										{continueResponse}
@@ -2288,16 +2094,13 @@
 										{mergeResponses}
 										{chatActionHandler}
 										{addMessages}
-										topPadding={true}
 										bottomPadding={files.length > 0}
-										{onSelect}
 									/>
 								</div>
 							</div>
 
 							<div class=" pb-2">
 								<MessageInput
-									bind:this={messageInput}
 									{history}
 									{taskIds}
 									{selectedModels}
@@ -2310,14 +2113,20 @@
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
 									bind:atSelectedModel
-									bind:showCommands
 									toolServers={$toolServers}
-									{generating}
+									transparentBackground={$settings?.backgroundImageUrl ?? false}
 									{stopResponse}
 									{createMessagePair}
-									onChange={(data) => {
+									onChange={(input) => {
 										if (!$temporaryChatEnabled) {
-											saveDraft(data, $chatId);
+											if (input.prompt !== null) {
+												localStorage.setItem(
+													`chat-input${$chatId ? `-${$chatId}` : ''}`,
+													JSON.stringify(input)
+												);
+											} else {
+												localStorage.removeItem(`chat-input${$chatId ? `-${$chatId}` : ''}`);
+											}
 										}
 									}}
 									on:upload={async (e) => {
@@ -2332,10 +2141,8 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
-
 											submitPrompt(
 												($settings?.richTextInput ?? true)
 													? e.detail.replaceAll('\n\n', '\n')
@@ -2352,11 +2159,10 @@
 								</div>
 							</div>
 						{:else}
-							<div class="flex items-center h-full">
+							<div class="overflow-auto w-full h-full flex items-center">
 								<Placeholder
 									{history}
 									{selectedModels}
-									bind:messageInput
 									bind:files
 									bind:prompt
 									bind:autoScroll
@@ -2366,16 +2172,10 @@
 									bind:codeInterpreterEnabled
 									bind:webSearchEnabled
 									bind:atSelectedModel
-									bind:showCommands
+									transparentBackground={$settings?.backgroundImageUrl ?? false}
 									toolServers={$toolServers}
 									{stopResponse}
 									{createMessagePair}
-									{onSelect}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft(data);
-										}
-									}}
 									on:upload={async (e) => {
 										const { type, data } = e.detail;
 
@@ -2386,7 +2186,6 @@
 										}
 									}}
 									on:submit={async (e) => {
-										clearDraft();
 										if (e.detail || files.length > 0) {
 											await tick();
 											submitPrompt(
@@ -2428,7 +2227,7 @@
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">
 			<div class="m-auto">
-				<Spinner className="size-5" />
+				<Spinner />
 			</div>
 		</div>
 	{/if}

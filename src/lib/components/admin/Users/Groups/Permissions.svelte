@@ -21,9 +21,6 @@
 		},
 		chat: {
 			controls: true,
-			valves: true,
-			system_prompt: true,
-			params: true,
 			file_upload: true,
 			delete: true,
 			edit: true,
@@ -158,7 +155,7 @@
 				<select
 					class="w-full bg-transparent outline-hidden py-0.5 text-sm"
 					bind:value={permissions.model.default_id}
-					placeholder={$i18n.t('Select a model')}
+					placeholder="Select a model"
 				>
 					<option value="" disabled selected>{$i18n.t('Select a model')}</option>
 					{#each permissions.model.filter ? $models.filter( (model) => filterModelIds.includes(model.id) ) : $models.filter((model) => model.id) as model}
@@ -266,31 +263,13 @@
 			<Switch bind:state={permissions.chat.controls} />
 		</div>
 
-		{#if permissions.chat.controls}
-			<div class="  flex w-full justify-between my-2 pr-2">
-				<div class=" self-center text-xs font-medium">
-					{$i18n.t('Allow Chat Valves')}
-				</div>
-
-				<Switch bind:state={permissions.chat.valves} />
+		<div class="  flex w-full justify-between my-2 pr-2">
+			<div class=" self-center text-xs font-medium">
+				{$i18n.t('Allow Chat System Prompt')}
 			</div>
 
-			<div class="  flex w-full justify-between my-2 pr-2">
-				<div class=" self-center text-xs font-medium">
-					{$i18n.t('Allow Chat System Prompt')}
-				</div>
-
-				<Switch bind:state={permissions.chat.system_prompt} />
-			</div>
-
-			<div class="  flex w-full justify-between my-2 pr-2">
-				<div class=" self-center text-xs font-medium">
-					{$i18n.t('Allow Chat Params')}
-				</div>
-
-				<Switch bind:state={permissions.chat.params} />
-			</div>
-		{/if}
+			<Switch bind:state={permissions.chat.system_prompt} />
+		</div>
 
 		<div class="  flex w-full justify-between my-2 pr-2">
 			<div class=" self-center text-xs font-medium">

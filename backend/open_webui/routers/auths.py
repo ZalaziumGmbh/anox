@@ -15,9 +15,10 @@ from open_webui.models.auths import (
     SigninResponse,
     SignupForm,
     UpdatePasswordForm,
+    UpdateProfileForm,
     UserResponse,
 )
-from open_webui.models.users import Users, UpdateProfileForm
+from open_webui.models.users import Users
 from open_webui.models.groups import Groups
 
 from open_webui.constants import ERROR_MESSAGES, WEBHOOK_MESSAGES
@@ -72,13 +73,7 @@ class SessionUserResponse(Token, UserResponse):
     permissions: Optional[dict] = None
 
 
-class SessionUserInfoResponse(SessionUserResponse):
-    bio: Optional[str] = None
-    gender: Optional[str] = None
-    date_of_birth: Optional[datetime.date] = None
-
-
-@router.get("/", response_model=SessionUserInfoResponse)
+@router.get("/", response_model=SessionUserResponse)
 async def get_session_user(
     request: Request, response: Response, user=Depends(get_current_user)
 ):
@@ -126,9 +121,6 @@ async def get_session_user(
         "name": user.name,
         "role": user.role,
         "profile_image_url": user.profile_image_url,
-        "bio": user.bio,
-        "gender": user.gender,
-        "date_of_birth": user.date_of_birth,
         "permissions": user_permissions,
     }
 
@@ -145,7 +137,7 @@ async def update_profile(
     if session_user:
         user = Users.update_user_by_id(
             session_user.id,
-            form_data.model_dump(),
+            {"profile_image_url": form_data.profile_image_url, "name": form_data.name},
         )
         if user:
             return user
@@ -359,9 +351,11 @@ async def ldap_auth(request: Request, response: Response, form_data: LdapForm):
             user = Users.get_user_by_email(email)
             if not user:
                 try:
+                    user_count = Users.get_num_users()
+
                     role = (
                         "admin"
-                        if not Users.has_users()
+                        if user_count == 0
                         else request.app.state.config.DEFAULT_USER_ROLE
                     )
 
@@ -495,7 +489,7 @@ async def signin(request: Request, response: Response, form_data: SigninForm):
         if Users.get_user_by_email(admin_email.lower()):
             user = Auths.authenticate_user(admin_email.lower(), admin_password)
         else:
-            if Users.has_users():
+            if Users.get_num_users() != 0:
                 raise HTTPException(400, detail=ERROR_MESSAGES.EXISTING_USERS)
 
             await signup(
@@ -562,7 +556,6 @@ async def signin(request: Request, response: Response, form_data: SigninForm):
 
 @router.post("/signup", response_model=SessionUserResponse)
 async def signup(request: Request, response: Response, form_data: SignupForm):
-    has_users = Users.has_users()
 
     if WEBUI_AUTH:
         if (
@@ -573,11 +566,12 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
                 status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED
             )
     else:
-        if has_users:
+        if Users.get_num_users() != 0:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, detail=ERROR_MESSAGES.ACCESS_PROHIBITED
             )
 
+    user_count = Users.get_num_users()
     if not validate_email_format(form_data.email.lower()):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, detail=ERROR_MESSAGES.INVALID_EMAIL_FORMAT
@@ -587,7 +581,9 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
         raise HTTPException(400, detail=ERROR_MESSAGES.EMAIL_TAKEN)
 
     try:
-        role = "admin" if not has_users else request.app.state.config.DEFAULT_USER_ROLE
+        role = (
+            "admin" if user_count == 0 else request.app.state.config.DEFAULT_USER_ROLE
+        )
 
         # The password passed to bcrypt must be 72 bytes or fewer. If it is longer, it will be truncated before hashing.
         if len(form_data.password.encode("utf-8")) > 72:
@@ -633,7 +629,7 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
             )
 
             if request.app.state.config.WEBHOOK_URL:
-                await post_webhook(
+                post_webhook(
                     request.app.state.WEBUI_NAME,
                     request.app.state.config.WEBHOOK_URL,
                     WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
@@ -648,7 +644,7 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
                 user.id, request.app.state.config.USER_PERMISSIONS
             )
 
-            if not has_users:
+            if user_count == 0:
                 # Disable signup after the first user is created
                 request.app.state.config.ENABLE_SIGNUP = False
 
@@ -673,13 +669,12 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
 @router.get("/signout")
 async def signout(request: Request, response: Response):
     response.delete_cookie("token")
-    response.delete_cookie("oui-session")
 
     if ENABLE_OAUTH_SIGNUP.value:
         oauth_id_token = request.cookies.get("oauth_id_token")
-        if oauth_id_token and OPENID_PROVIDER_URL.value:
+        if oauth_id_token:
             try:
-                async with ClientSession(trust_env=True) as session:
+                async with ClientSession() as session:
                     async with session.get(OPENID_PROVIDER_URL.value) as resp:
                         if resp.status == 200:
                             openid_data = await resp.json()
@@ -691,12 +686,7 @@ async def signout(request: Request, response: Response):
                                     status_code=200,
                                     content={
                                         "status": True,
-                                        "redirect_url": f"{logout_url}?id_token_hint={oauth_id_token}"
-                                        + (
-                                            f"&post_logout_redirect_uri={WEBUI_AUTH_SIGNOUT_REDIRECT_URL}"
-                                            if WEBUI_AUTH_SIGNOUT_REDIRECT_URL
-                                            else ""
-                                        ),
+                                        "redirect_url": f"{logout_url}?id_token_hint={oauth_id_token}",
                                     },
                                     headers=response.headers,
                                 )

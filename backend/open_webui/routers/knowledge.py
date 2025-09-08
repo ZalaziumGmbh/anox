@@ -25,7 +25,6 @@ from open_webui.utils.access_control import has_access, has_permission
 
 
 from open_webui.env import SRC_LOG_LEVELS
-from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
 
 
@@ -43,7 +42,7 @@ router = APIRouter()
 async def get_knowledge(user=Depends(get_verified_user)):
     knowledge_bases = []
 
-    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+    if user.role == "admin":
         knowledge_bases = Knowledges.get_knowledge_bases()
     else:
         knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
@@ -91,7 +90,7 @@ async def get_knowledge(user=Depends(get_verified_user)):
 async def get_knowledge_list(user=Depends(get_verified_user)):
     knowledge_bases = []
 
-    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
+    if user.role == "admin":
         knowledge_bases = Knowledges.get_knowledge_bases()
     else:
         knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "write")

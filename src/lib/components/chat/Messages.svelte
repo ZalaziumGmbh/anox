@@ -36,9 +36,7 @@
 
 	let messages = [];
 
-	export let setInputText: Function = () => {};
-
-	export let sendMessage: Function;
+	export let sendPrompt: Function;
 	export let continueResponse: Function;
 	export let regenerateResponse: Function;
 	export let mergeResponses: Function;
@@ -50,11 +48,8 @@
 
 	export let readOnly = false;
 
-	export let topPadding = false;
 	export let bottomPadding = false;
 	export let autoScroll;
-
-	export let onSelect = (e) => {};
 
 	let messagesCount = 20;
 	let messagesLoading = false;
@@ -295,7 +290,7 @@
 				history.currentId = userMessageId;
 
 				await tick();
-				await sendMessage(history, userMessageId);
+				await sendPrompt(history, userPrompt, userMessageId);
 			} else {
 				// Edit user message
 				history.messages[messageId].content = content;
@@ -400,12 +395,29 @@
 
 <div class={className}>
 	{#if Object.keys(history?.messages ?? {}).length == 0}
-		<ChatPlaceholder modelIds={selectedModels} {atSelectedModel} {onSelect} />
+		<ChatPlaceholder
+			modelIds={selectedModels}
+			{atSelectedModel}
+			submitPrompt={async (p) => {
+				let text = p;
+
+				if (p.includes('{{CLIPBOARD}}')) {
+					const clipboardText = await navigator.clipboard.readText().catch((err) => {
+						toast.error($i18n.t('Failed to read clipboard contents'));
+						return '{{CLIPBOARD}}';
+					});
+
+					text = p.replaceAll('{{CLIPBOARD}}', clipboardText);
+				}
+
+				prompt = text;
+				await tick();
+			}}
+		/>
 	{:else}
 		<div class="w-full pt-2">
 			{#key chatId}
-				<section class="w-full" aria-labelledby="chat-conversation">
-					<h2 class="sr-only" id="chat-conversation">{$i18n.t('Chat Conversation')}</h2>
+				<div class="w-full">
 					{#if messages.at(0)?.parentId !== null}
 						<Loader
 							on:visible={(e) => {
@@ -417,41 +429,37 @@
 						>
 							<div class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2">
 								<Spinner className=" size-4" />
-								<div class=" ">{$i18n.t('Loading...')}</div>
+								<div class=" ">Loading...</div>
 							</div>
 						</Loader>
 					{/if}
-					<ul role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false">
-						{#each messages as message, messageIdx (message.id)}
-							<Message
-								{chatId}
-								bind:history
-								{selectedModels}
-								messageId={message.id}
-								idx={messageIdx}
-								{user}
-								{setInputText}
-								{gotoMessage}
-								{showPreviousMessage}
-								{showNextMessage}
-								{updateChat}
-								{editMessage}
-								{deleteMessage}
-								{rateMessage}
-								{actionMessage}
-								{saveMessage}
-								{submitMessage}
-								{regenerateResponse}
-								{continueResponse}
-								{mergeResponses}
-								{addMessages}
-								{triggerScroll}
-								{readOnly}
-								{topPadding}
-							/>
-						{/each}
-					</ul>
-				</section>
+
+					{#each messages as message, messageIdx (message.id)}
+						<Message
+							{chatId}
+							bind:history
+							messageId={message.id}
+							idx={messageIdx}
+							{user}
+							{gotoMessage}
+							{showPreviousMessage}
+							{showNextMessage}
+							{updateChat}
+							{editMessage}
+							{deleteMessage}
+							{rateMessage}
+							{actionMessage}
+							{saveMessage}
+							{submitMessage}
+							{regenerateResponse}
+							{continueResponse}
+							{mergeResponses}
+							{addMessages}
+							{triggerScroll}
+							{readOnly}
+						/>
+					{/each}
+				</div>
 				<div class="pb-12" />
 				{#if bottomPadding}
 					<div class="  pb-6" />
