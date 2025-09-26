@@ -20,9 +20,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 from fastapi import Request, HTTPException
+from fastapi.responses import HTMLResponse
 from starlette.responses import Response, StreamingResponse, JSONResponse
 
 
+from open_webui.models.oauth_sessions import OAuthSessions
 from open_webui.models.chats import Chats
 from open_webui.models.folders import Folders
 from open_webui.models.users import Users
@@ -52,6 +54,11 @@ from open_webui.routers.pipelines import (
 from open_webui.routers.memories import query_memory, QueryMemoryForm
 
 from open_webui.utils.webhook import post_webhook
+from open_webui.utils.files import (
+    get_audio_url_from_base64,
+    get_file_url_from_base64,
+    get_image_url_from_base64,
+)
 
 
 from open_webui.models.users import UserModel
@@ -86,6 +93,7 @@ from open_webui.utils.filter import (
 )
 from open_webui.utils.code_interpreter import execute_code_jupyter
 from open_webui.utils.payload import apply_system_prompt_to_body
+from open_webui.utils.mcp.client import MCPClient
 
 
 from open_webui.config import (
@@ -144,12 +152,14 @@ async def chat_completion_tools_handler(
 
     def get_tools_function_calling_payload(messages, task_model_id, content):
         user_message = get_last_user_message(messages)
-        history = "\n".join(
+
+        recent_messages = messages[-4:] if len(messages) > 4 else messages
+        chat_history = "\n".join(
             f"{message['role'].upper()}: \"\"\"{message['content']}\"\"\""
-            for message in messages[::-1][:4]
+            for message in recent_messages
         )
 
-        prompt = f"History:\n{history}\nQuery: {user_message}"
+        prompt = f"History:\n{chat_history}\nQuery: {user_message}"
 
         return {
             "model": task_model_id,
@@ -369,7 +379,7 @@ async def chat_web_search_handler(
             "type": "status",
             "data": {
                 "action": "web_search",
-                "description": "Generating search query",
+                "description": "Searching the web",
                 "done": False,
             },
         }
@@ -435,8 +445,8 @@ async def chat_web_search_handler(
         {
             "type": "status",
             "data": {
-                "action": "web_search",
-                "description": "Searching the web",
+                "action": "web_search_queries_generated",
+                "queries": queries,
                 "done": False,
             },
         }
@@ -487,6 +497,7 @@ async def chat_web_search_handler(
                         "action": "web_search",
                         "description": "Searched {{count}} sites",
                         "urls": results["filenames"],
+                        "items": results.get("items", []),
                         "done": True,
                     },
                 }
@@ -529,7 +540,7 @@ async def chat_image_generation_handler(
     await __event_emitter__(
         {
             "type": "status",
-            "data": {"description": "Generating an image", "done": False},
+            "data": {"description": "Creating image", "done": False},
         }
     )
 
@@ -581,7 +592,7 @@ async def chat_image_generation_handler(
         await __event_emitter__(
             {
                 "type": "status",
-                "data": {"description": "Generated an image", "done": True},
+                "data": {"description": "Image created", "done": True},
             }
         )
 
@@ -624,42 +635,59 @@ async def chat_image_generation_handler(
 
 
 async def chat_completion_files_handler(
-    request: Request, body: dict, user: UserModel
+    request: Request, body: dict, extra_params: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
+    __event_emitter__ = extra_params["__event_emitter__"]
     sources = []
 
     if files := body.get("metadata", {}).get("files", None):
+        # Check if all files are in full context mode
+        all_full_context = all(item.get("context") == "full" for item in files)
+
         queries = []
-        try:
-            queries_response = await generate_queries(
-                request,
-                {
-                    "model": body["model"],
-                    "messages": body["messages"],
-                    "type": "retrieval",
-                },
-                user,
-            )
-            queries_response = queries_response["choices"][0]["message"]["content"]
-
+        if not all_full_context:
             try:
-                bracket_start = queries_response.find("{")
-                bracket_end = queries_response.rfind("}") + 1
+                queries_response = await generate_queries(
+                    request,
+                    {
+                        "model": body["model"],
+                        "messages": body["messages"],
+                        "type": "retrieval",
+                    },
+                    user,
+                )
+                queries_response = queries_response["choices"][0]["message"]["content"]
 
-                if bracket_start == -1 or bracket_end == -1:
-                    raise Exception("No JSON object found in the response")
+                try:
+                    bracket_start = queries_response.find("{")
+                    bracket_end = queries_response.rfind("}") + 1
 
-                queries_response = queries_response[bracket_start:bracket_end]
-                queries_response = json.loads(queries_response)
-            except Exception as e:
-                queries_response = {"queries": [queries_response]}
+                    if bracket_start == -1 or bracket_end == -1:
+                        raise Exception("No JSON object found in the response")
 
-            queries = queries_response.get("queries", [])
-        except:
-            pass
+                    queries_response = queries_response[bracket_start:bracket_end]
+                    queries_response = json.loads(queries_response)
+                except Exception as e:
+                    queries_response = {"queries": [queries_response]}
+
+                queries = queries_response.get("queries", [])
+            except:
+                pass
 
         if len(queries) == 0:
             queries = [get_last_user_message(body["messages"])]
+
+        if not all_full_context:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "action": "queries_generated",
+                        "queries": queries,
+                        "done": False,
+                    },
+                }
+            )
 
         try:
             # Offload get_sources_from_items to a separate thread
@@ -688,7 +716,8 @@ async def chat_completion_files_handler(
                         r=request.app.state.config.RELEVANCE_THRESHOLD,
                         hybrid_bm25_weight=request.app.state.config.HYBRID_BM25_WEIGHT,
                         hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                        full_context=request.app.state.config.RAG_FULL_CONTEXT,
+                        full_context=all_full_context
+                        or request.app.state.config.RAG_FULL_CONTEXT,
                         user=user,
                     ),
                 )
@@ -696,6 +725,38 @@ async def chat_completion_files_handler(
             log.exception(e)
 
         log.debug(f"rag_contexts:sources: {sources}")
+
+        unique_ids = set()
+
+        for source in sources or []:
+            if not source or len(source.keys()) == 0:
+                continue
+
+            documents = source.get("document") or []
+            metadatas = source.get("metadata") or []
+            src_info = source.get("source") or {}
+
+            for index, _ in enumerate(documents):
+                metadata = metadatas[index] if index < len(metadatas) else None
+                _id = (
+                    (metadata or {}).get("source")
+                    or (src_info or {}).get("id")
+                    or "N/A"
+                )
+                unique_ids.add(_id)
+
+        sources_count = len(unique_ids)
+
+        await __event_emitter__(
+            {
+                "type": "status",
+                "data": {
+                    "action": "sources_retrieved",
+                    "count": sources_count,
+                    "done": True,
+                },
+            }
+        )
 
     return body, {"sources": sources}
 
@@ -770,6 +831,16 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     event_emitter = get_event_emitter(metadata)
     event_call = get_event_call(metadata)
 
+    oauth_token = None
+    try:
+        if request.cookies.get("oauth_session_id", None):
+            oauth_token = await request.app.state.oauth_manager.get_oauth_token(
+                user.id,
+                request.cookies.get("oauth_session_id", None),
+            )
+    except Exception as e:
+        log.error(f"Error getting OAuth token: {e}")
+
     extra_params = {
         "__event_emitter__": event_emitter,
         "__event_call__": event_call,
@@ -777,6 +848,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         "__metadata__": metadata,
         "__request__": request,
         "__model__": model,
+        "__oauth_token__": oauth_token,
     }
 
     # Initialize events to store additional event to be sent to the client
@@ -885,7 +957,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             extra_params=extra_params,
         )
     except Exception as e:
-        raise Exception(f"Error: {e}")
+        raise Exception(f"{e}")
 
     features = form_data.pop("features", None)
     if features:
@@ -931,14 +1003,107 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # Server side tools
     tool_ids = metadata.get("tool_ids", None)
     # Client side tools
-    tool_servers = metadata.get("tool_servers", None)
+    direct_tool_servers = metadata.get("tool_servers", None)
 
     log.debug(f"{tool_ids=}")
-    log.debug(f"{tool_servers=}")
+    log.debug(f"{direct_tool_servers=}")
 
     tools_dict = {}
 
+    mcp_clients = []
+    mcp_tools_dict = {}
+
     if tool_ids:
+        for tool_id in tool_ids:
+            if tool_id.startswith("server:mcp:"):
+                try:
+                    server_id = tool_id[len("server:mcp:") :]
+
+                    mcp_server_connection = None
+                    for (
+                        server_connection
+                    ) in request.app.state.config.TOOL_SERVER_CONNECTIONS:
+                        if (
+                            server_connection.get("type", "") == "mcp"
+                            and server_connection.get("info", {}).get("id") == server_id
+                        ):
+                            mcp_server_connection = server_connection
+                            break
+
+                    if not mcp_server_connection:
+                        log.error(f"MCP server with id {server_id} not found")
+                        continue
+
+                    auth_type = mcp_server_connection.get("auth_type", "")
+
+                    headers = {}
+                    if auth_type == "bearer":
+                        headers["Authorization"] = (
+                            f"Bearer {mcp_server_connection.get('key', '')}"
+                        )
+                    elif auth_type == "none":
+                        # No authentication
+                        pass
+                    elif auth_type == "session":
+                        headers["Authorization"] = (
+                            f"Bearer {request.state.token.credentials}"
+                        )
+                    elif auth_type == "system_oauth":
+                        oauth_token = extra_params.get("__oauth_token__", None)
+                        if oauth_token:
+                            headers["Authorization"] = (
+                                f"Bearer {oauth_token.get('access_token', '')}"
+                            )
+                    elif auth_type == "oauth_2.1":
+                        try:
+                            splits = server_id.split(":")
+                            server_id = splits[-1] if len(splits) > 1 else server_id
+
+                            oauth_token = await request.app.state.oauth_client_manager.get_oauth_token(
+                                user.id, f"mcp:{server_id}"
+                            )
+
+                            if oauth_token:
+                                headers["Authorization"] = (
+                                    f"Bearer {oauth_token.get('access_token', '')}"
+                                )
+                        except Exception as e:
+                            log.error(f"Error getting OAuth token: {e}")
+                            oauth_token = None
+
+                    mcp_client = MCPClient()
+                    await mcp_client.connect(
+                        url=mcp_server_connection.get("url", ""),
+                        headers=headers if headers else None,
+                    )
+
+                    tool_specs = await mcp_client.list_tool_specs()
+                    for tool_spec in tool_specs:
+
+                        def make_tool_function(function_name):
+                            async def tool_function(**kwargs):
+                                return await mcp_client.call_tool(
+                                    function_name,
+                                    function_args=kwargs,
+                                )
+
+                            return tool_function
+
+                        tool_function = make_tool_function(tool_spec["name"])
+
+                        mcp_tools_dict[tool_spec["name"]] = {
+                            "spec": tool_spec,
+                            "callable": tool_function,
+                            "type": "mcp",
+                            "client": mcp_client,
+                            "direct": False,
+                        }
+
+                    mcp_clients.append(mcp_client)
+                except Exception as e:
+                    log.debug(e)
+                    continue
+
         tools_dict = await get_tools(
             request,
             tool_ids,
@@ -950,9 +1115,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 "__files__": metadata.get("files", []),
             },
         )
+        if mcp_tools_dict:
+            tools_dict = {**tools_dict, **mcp_tools_dict}
 
-    if tool_servers:
-        for tool_server in tool_servers:
+    if direct_tool_servers:
+        for tool_server in direct_tool_servers:
             tool_specs = tool_server.pop("specs", [])
 
             for tool in tool_specs:
@@ -962,6 +1129,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     "server": tool_server,
                 }
 
+    if mcp_clients:
+        metadata["mcp_clients"] = mcp_clients
+
     if tools_dict:
         if metadata.get("params", {}).get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
@@ -970,6 +1140,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 {"type": "function", "function": tool.get("spec", {})}
                 for tool in tools_dict.values()
             ]
+
         else:
             # If the function calling is not native, then call the tools function calling handler
             try:
@@ -981,7 +1152,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 log.exception(e)
 
     try:
-        form_data, flags = await chat_completion_files_handler(request, form_data, user)
+        form_data, flags = await chat_completion_files_handler(
+            request, form_data, extra_params, user
+        )
         sources.extend(flags.get("sources", []))
     except Exception as e:
         log.exception(e)
@@ -1021,26 +1194,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             raise Exception("No user message found")
 
         if context_string != "":
-            # Workaround for Ollama 2.0+ system prompt issue
-            # TODO: replace with add_or_update_system_message
-            if model.get("owned_by") == "ollama":
-                form_data["messages"] = prepend_to_first_user_message_content(
-                    rag_template(
-                        request.app.state.config.RAG_TEMPLATE,
-                        context_string,
-                        prompt,
-                    ),
-                    form_data["messages"],
-                )
-            else:
-                form_data["messages"] = add_or_update_system_message(
-                    rag_template(
-                        request.app.state.config.RAG_TEMPLATE,
-                        context_string,
-                        prompt,
-                    ),
-                    form_data["messages"],
-                )
+            form_data["messages"] = add_or_update_user_message(
+                rag_template(
+                    request.app.state.config.RAG_TEMPLATE,
+                    context_string,
+                    prompt,
+                ),
+                form_data["messages"],
+                append=False,
+            )
 
     # If there are citations, add them to the data_items
     sources = [
@@ -1073,11 +1235,11 @@ async def process_chat_response(
     request, response, form_data, user, metadata, model, events, tasks
 ):
     async def background_tasks_handler():
-        message_map = Chats.get_messages_by_chat_id(metadata["chat_id"])
-        message = message_map.get(metadata["message_id"]) if message_map else None
+        messages_map = Chats.get_messages_map_by_chat_id(metadata["chat_id"])
+        message = messages_map.get(metadata["message_id"]) if messages_map else None
 
         if message:
-            message_list = get_message_list(message_map, metadata["message_id"])
+            message_list = get_message_list(messages_map, metadata["message_id"])
 
             # Remove details tags and files from the messages.
             # as get_message_list creates a new list, it does not affect
@@ -1284,118 +1446,134 @@ async def process_chat_response(
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
         if event_emitter:
-            if isinstance(response, dict) or isinstance(response, JSONResponse):
+            try:
+                if isinstance(response, dict) or isinstance(response, JSONResponse):
+                    if isinstance(response, list) and len(response) == 1:
+                        # If the response is a single-item list, unwrap it #17213
+                        response = response[0]
 
-                if isinstance(response, JSONResponse) and isinstance(
-                    response.body, bytes
-                ):
-                    try:
-                        response_data = json.loads(response.body.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        response_data = {"error": {"detail": "Invalid JSON response"}}
-                else:
-                    response_data = response
-
-                if "error" in response_data:
-                    error = response_data["error"].get("detail", response_data["error"])
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "error": {"content": error},
-                        },
-                    )
-                    if isinstance(error, str) or isinstance(error, dict):
-                        await event_emitter(
-                            {
-                                "type": "chat:message:error",
-                                "data": {"error": {"content": error}},
-                            },
-                        )
-
-                if "selected_model_id" in response_data:
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "selectedModelId": response_data["selected_model_id"],
-                        },
-                    )
-
-                choices = response_data.get("choices", [])
-                if choices and choices[0].get("message", {}).get("content"):
-                    content = response_data["choices"][0]["message"]["content"]
-
-                    if content:
-                        await event_emitter(
-                            {
-                                "type": "chat:completion",
-                                "data": response_data,
+                    if isinstance(response, JSONResponse) and isinstance(
+                        response.body, bytes
+                    ):
+                        try:
+                            response_data = json.loads(response.body.decode("utf-8"))
+                        except json.JSONDecodeError:
+                            response_data = {
+                                "error": {"detail": "Invalid JSON response"}
                             }
-                        )
+                    else:
+                        response_data = response
 
-                        title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                    if "error" in response_data:
+                        error = response_data.get("error")
 
-                        await event_emitter(
-                            {
-                                "type": "chat:completion",
-                                "data": {
-                                    "done": True,
-                                    "content": content,
-                                    "title": title,
-                                },
-                            }
-                        )
+                        if isinstance(error, dict):
+                            error = error.get("detail", error)
+                        else:
+                            error = str(error)
 
-                        # Save message in the database
                         Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata["chat_id"],
                             metadata["message_id"],
                             {
-                                "role": "assistant",
-                                "content": content,
+                                "error": {"content": error},
+                            },
+                        )
+                        if isinstance(error, str) or isinstance(error, dict):
+                            await event_emitter(
+                                {
+                                    "type": "chat:message:error",
+                                    "data": {"error": {"content": error}},
+                                }
+                            )
+
+                    if "selected_model_id" in response_data:
+                        Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata["chat_id"],
+                            metadata["message_id"],
+                            {
+                                "selectedModelId": response_data["selected_model_id"],
                             },
                         )
 
-                        # Send a webhook notification if the user is not active
-                        if not get_active_status_by_user_id(user.id):
-                            webhook_url = Users.get_user_webhook_url_by_id(user.id)
-                            if webhook_url:
-                                await post_webhook(
-                                    request.app.state.WEBUI_NAME,
-                                    webhook_url,
-                                    f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
-                                    {
-                                        "action": "chat",
-                                        "message": content,
+                    choices = response_data.get("choices", [])
+                    if choices and choices[0].get("message", {}).get("content"):
+                        content = response_data["choices"][0]["message"]["content"]
+
+                        if content:
+                            await event_emitter(
+                                {
+                                    "type": "chat:completion",
+                                    "data": response_data,
+                                }
+                            )
+
+                            title = Chats.get_chat_title_by_id(metadata["chat_id"])
+
+                            await event_emitter(
+                                {
+                                    "type": "chat:completion",
+                                    "data": {
+                                        "done": True,
+                                        "content": content,
                                         "title": title,
-                                        "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
                                     },
-                                )
+                                }
+                            )
 
-                        await background_tasks_handler()
+                            # Save message in the database
+                            Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata["chat_id"],
+                                metadata["message_id"],
+                                {
+                                    "role": "assistant",
+                                    "content": content,
+                                },
+                            )
 
-                if events and isinstance(events, list):
-                    extra_response = {}
-                    for event in events:
-                        if isinstance(event, dict):
-                            extra_response.update(event)
-                        else:
-                            extra_response[event] = True
+                            # Send a webhook notification if the user is not active
+                            if not get_active_status_by_user_id(user.id):
+                                webhook_url = Users.get_user_webhook_url_by_id(user.id)
+                                if webhook_url:
+                                    await post_webhook(
+                                        request.app.state.WEBUI_NAME,
+                                        webhook_url,
+                                        f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
+                                        {
+                                            "action": "chat",
+                                            "message": content,
+                                            "title": title,
+                                            "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
+                                        },
+                                    )
 
-                    response_data = {
-                        **extra_response,
-                        **response_data,
-                    }
+                            await background_tasks_handler()
 
-                if isinstance(response, dict):
-                    response = response_data
-                if isinstance(response, JSONResponse):
-                    response = JSONResponse(
-                        content=response_data,
-                        headers=response.headers,
-                        status_code=response.status_code,
-                    )
+                    if events and isinstance(events, list):
+                        extra_response = {}
+                        for event in events:
+                            if isinstance(event, dict):
+                                extra_response.update(event)
+                            else:
+                                extra_response[event] = True
+
+                        response_data = {
+                            **extra_response,
+                            **response_data,
+                        }
+
+                    if isinstance(response, dict):
+                        response = response_data
+                    if isinstance(response, JSONResponse):
+                        response = JSONResponse(
+                            content=response_data,
+                            headers=response.headers,
+                            status_code=response.status_code,
+                        )
+
+            except Exception as e:
+                log.debug(f"Error occurred while processing request: {e}")
+                pass
 
             return response
         else:
@@ -1421,11 +1599,22 @@ async def process_chat_response(
     ):
         return response
 
+    oauth_token = None
+    try:
+        if request.cookies.get("oauth_session_id", None):
+            oauth_token = await request.app.state.oauth_manager.get_oauth_token(
+                user.id,
+                request.cookies.get("oauth_session_id", None),
+            )
+    except Exception as e:
+        log.error(f"Error getting OAuth token: {e}")
+
     extra_params = {
         "__event_emitter__": event_emitter,
         "__event_call__": event_caller,
         "__user__": user.model_dump() if isinstance(user, UserModel) else {},
         "__metadata__": metadata,
+        "__oauth_token__": oauth_token,
         "__request__": request,
         "__model__": model,
     }
@@ -1495,8 +1684,9 @@ async def process_chat_response(
                                         tool_result_files = result.get("files", None)
                                         break
 
-                                if tool_result:
-                                    tool_calls_display_content = f'{tool_calls_display_content}<details type="tool_calls" done="true" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}" result="{html.escape(json.dumps(tool_result, ensure_ascii=False))}" files="{html.escape(json.dumps(tool_result_files)) if tool_result_files else ""}">\n<summary>Tool Executed</summary>\n</details>\n'
+                                if tool_result is not None:
+                                    tool_result_embeds = result.get("embeds", "")
+                                    tool_calls_display_content = f'{tool_calls_display_content}<details type="tool_calls" done="true" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}" result="{html.escape(json.dumps(tool_result, ensure_ascii=False))}" files="{html.escape(json.dumps(tool_result_files)) if tool_result_files else ""}" embeds="{html.escape(json.dumps(tool_result_embeds))}">\n<summary>Tool Executed</summary>\n</details>\n'
                                 else:
                                     tool_calls_display_content = f'{tool_calls_display_content}<details type="tool_calls" done="false" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}">\n<summary>Executing...</summary>\n</details>\n'
 
@@ -1610,7 +1800,7 @@ async def process_chat_response(
                                 {
                                     "role": "tool",
                                     "tool_call_id": result["tool_call_id"],
-                                    "content": result["content"],
+                                    "content": result.get("content", "") or "",
                                 }
                             )
                         temp_blocks = []
@@ -1946,6 +2136,20 @@ async def process_chat_response(
                                     )
                                 else:
                                     choices = data.get("choices", [])
+
+                                    # 17421
+                                    usage = data.get("usage", {}) or {}
+                                    usage.update(data.get("timings", {}))  # llama.cpp
+                                    if usage:
+                                        await event_emitter(
+                                            {
+                                                "type": "chat:completion",
+                                                "data": {
+                                                    "usage": usage,
+                                                },
+                                            }
+                                        )
+
                                     if not choices:
                                         error = data.get("error", {})
                                         if error:
@@ -1954,16 +2158,6 @@ async def process_chat_response(
                                                     "type": "chat:completion",
                                                     "data": {
                                                         "error": error,
-                                                    },
-                                                }
-                                            )
-                                        usage = data.get("usage", {})
-                                        if usage:
-                                            await event_emitter(
-                                                {
-                                                    "type": "chat:completion",
-                                                    "data": {
-                                                        "usage": usage,
                                                     },
                                                 }
                                             )
@@ -2239,6 +2433,8 @@ async def process_chat_response(
                     results = []
 
                     for tool_call in response_tool_calls:
+
+                        print("tool_call", tool_call)
                         tool_call_id = tool_call.get("id", "")
                         tool_name = tool_call.get("function", {}).get("name", "")
                         tool_args = tool_call.get("function", {}).get("arguments", "{}")
@@ -2313,13 +2509,144 @@ async def process_chat_response(
                             except Exception as e:
                                 tool_result = str(e)
 
+                        tool_result_embeds = []
+                        if isinstance(tool_result, HTMLResponse):
+                            content_disposition = tool_result.headers.get(
+                                "Content-Disposition", ""
+                            )
+                            if "inline" in content_disposition:
+                                content = tool_result.body.decode("utf-8")
+                                tool_result_embeds.append(content)
+
+                                if 200 <= tool_result.status_code < 300:
+                                    tool_result = {
+                                        "status": "success",
+                                        "code": "ui_component",
+                                        "message": "Embedded UI result is active and visible to the user.",
+                                    }
+                                elif 400 <= tool_result.status_code < 500:
+                                    tool_result = {
+                                        "status": "error",
+                                        "code": "ui_component",
+                                        "message": f"Client error {tool_result.status_code} from embedded UI result.",
+                                    }
+                                elif 500 <= tool_result.status_code < 600:
+                                    tool_result = {
+                                        "status": "error",
+                                        "code": "ui_component",
+                                        "message": f"Server error {tool_result.status_code} from embedded UI result.",
+                                    }
+                                else:
+                                    tool_result = {
+                                        "status": "error",
+                                        "code": "ui_component",
+                                        "message": f"Unexpected status code {tool_result.status_code} from embedded UI result.",
+                                    }
+                            else:
+                                tool_result = tool_result.body.decode("utf-8")
+
+                        elif (
+                            tool.get("type") == "external"
+                            and isinstance(tool_result, tuple)
+                        ) or (
+                            tool.get("direct", True)
+                            and isinstance(tool_result, list)
+                            and len(tool_result) == 2
+                        ):
+                            tool_result, tool_response_headers = tool_result
+
+                            if tool_response_headers:
+                                content_disposition = tool_response_headers.get(
+                                    "Content-Disposition",
+                                    tool_response_headers.get(
+                                        "content-disposition", ""
+                                    ),
+                                )
+
+                                if "inline" in content_disposition:
+                                    content_type = tool_response_headers.get(
+                                        "Content-Type",
+                                        tool_response_headers.get("content-type", ""),
+                                    )
+                                    location = tool_response_headers.get(
+                                        "Location",
+                                        tool_response_headers.get("location", ""),
+                                    )
+
+                                    if "text/html" in content_type:
+                                        # Display as iframe embed
+                                        tool_result_embeds.append(tool_result)
+                                        tool_result = {
+                                            "status": "success",
+                                            "code": "ui_component",
+                                            "message": "Embedded UI result is active and visible to the user.",
+                                        }
+                                    elif location:
+                                        tool_result_embeds.append(location)
+                                        tool_result = {
+                                            "status": "success",
+                                            "code": "ui_component",
+                                            "message": "Embedded UI result is active and visible to the user.",
+                                        }
+
                         tool_result_files = []
                         if isinstance(tool_result, list):
                             for item in tool_result:
                                 # check if string
                                 if isinstance(item, str) and item.startswith("data:"):
-                                    tool_result_files.append(item)
+                                    tool_result_files.append(
+                                        {
+                                            "type": "data",
+                                            "content": item,
+                                        }
+                                    )
                                     tool_result.remove(item)
+
+                                if tool.get("type") == "mcp":
+                                    if isinstance(item, dict):
+                                        if (
+                                            item.get("type") == "image"
+                                            or item.get("type") == "audio"
+                                        ):
+                                            file_url = get_file_url_from_base64(
+                                                request,
+                                                f"data:{item.get('mimeType')};base64,{item.get('data', item.get('blob', ''))}",
+                                                {
+                                                    "chat_id": metadata.get(
+                                                        "chat_id", None
+                                                    ),
+                                                    "message_id": metadata.get(
+                                                        "message_id", None
+                                                    ),
+                                                    "session_id": metadata.get(
+                                                        "session_id", None
+                                                    ),
+                                                    "result": item,
+                                                },
+                                                user,
+                                            )
+
+                                            tool_result_files.append(
+                                                {
+                                                    "type": item.get("type", "data"),
+                                                    "url": file_url,
+                                                }
+                                            )
+                                            tool_result.remove(item)
+
+                        if tool_result_files:
+                            if not isinstance(tool_result, list):
+                                tool_result = [
+                                    tool_result,
+                                ]
+
+                            for file in tool_result_files:
+                                tool_result.append(
+                                    {
+                                        "type": file.get("type", "data"),
+                                        "content": "Result is being displayed as a file.",
+                                    }
+                                )
 
                         if isinstance(tool_result, dict) or isinstance(
                             tool_result, list
@@ -2331,10 +2658,15 @@ async def process_chat_response(
                         results.append(
                             {
                                 "tool_call_id": tool_call_id,
-                                "content": tool_result,
+                                "content": tool_result or "",
                                 **(
                                     {"files": tool_result_files}
                                     if tool_result_files
+                                    else {}
+                                ),
+                                **(
+                                    {"embeds": tool_result_embeds}
+                                    if tool_result_embeds
                                     else {}
                                 ),
                             }
@@ -2482,23 +2814,18 @@ async def process_chat_response(
                                     if isinstance(stdout, str):
                                         stdoutLines = stdout.split("\n")
                                         for idx, line in enumerate(stdoutLines):
+
                                             if "data:image/png;base64" in line:
-                                                image_url = ""
-                                                # Extract base64 image data from the line
-                                                image_data, content_type = (
-                                                    load_b64_image_data(line)
+                                                image_url = get_image_url_from_base64(
+                                                    request,
+                                                    line,
+                                                    metadata,
+                                                    user,
                                                 )
-                                                if image_data is not None:
-                                                    image_url = upload_image(
-                                                        request,
-                                                        image_data,
-                                                        content_type,
-                                                        metadata,
-                                                        user,
+                                                if image_url:
+                                                    stdoutLines[idx] = (
+                                                        f"![Output Image]({image_url})"
                                                     )
-                                                stdoutLines[idx] = (
-                                                    f"![Output Image]({image_url})"
-                                                )
 
                                         output["stdout"] = "\n".join(stdoutLines)
 
@@ -2508,19 +2835,12 @@ async def process_chat_response(
                                         resultLines = result.split("\n")
                                         for idx, line in enumerate(resultLines):
                                             if "data:image/png;base64" in line:
-                                                image_url = ""
-                                                # Extract base64 image data from the line
-                                                image_data, content_type = (
-                                                    load_b64_image_data(line)
+                                                image_url = get_image_url_from_base64(
+                                                    request,
+                                                    line,
+                                                    metadata,
+                                                    user,
                                                 )
-                                                if image_data is not None:
-                                                    image_url = upload_image(
-                                                        request,
-                                                        image_data,
-                                                        content_type,
-                                                        metadata,
-                                                        user,
-                                                    )
                                                 resultLines[idx] = (
                                                     f"![Output Image]({image_url})"
                                                 )
@@ -2618,7 +2938,7 @@ async def process_chat_response(
                 await background_tasks_handler()
             except asyncio.CancelledError:
                 log.warning("Task was cancelled!")
-                await event_emitter({"type": "task-cancelled"})
+                await event_emitter({"type": "chat:tasks:cancel"})
 
                 if not ENABLE_REALTIME_CHAT_SAVE:
                     # Save message in the database
