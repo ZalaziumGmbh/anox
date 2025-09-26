@@ -354,8 +354,19 @@ export const getToolServersData = async (servers: object[]) => {
 				.filter((server) => server?.config?.enable)
 				.map(async (server) => {
 					let error = null;
+
+					let toolServerToken = null;
+					const auth_type = server?.auth_type ?? 'bearer';
+					if (auth_type === 'bearer') {
+						toolServerToken = server?.key;
+					} else if (auth_type === 'none') {
+						// No authentication
+					} else if (auth_type === 'session') {
+						toolServerToken = localStorage.token;
+					}
+
 					const data = await getToolServerData(
-						(server?.auth_type ?? 'bearer') === 'bearer' ? server?.key : localStorage.token,
+						toolServerToken,
 						(server?.path ?? '').includes('://')
 							? server?.path
 							: `${server?.url}${(server?.path ?? '').startsWith('/') ? '' : '/'}${server?.path}`
@@ -482,18 +493,25 @@ export const executeToolServer = async (
 			throw new Error(`HTTP error! Status: ${res.status}. Message: ${resText}`);
 		}
 
-		let responseData;
-		try {
-			responseData = await res.json();
-		} catch (err) {
-			responseData = await res.text();
-		}
+		// make a clone of res and extract headers
+		const responseHeaders = {};
+		res.headers.forEach((value, key) => {
+			responseHeaders[key] = value;
+		});
 
-		return responseData;
+		const text = await res.text();
+		let responseData;
+
+		try {
+			responseData = JSON.parse(text);
+		} catch {
+			responseData = text;
+		}
+		return [responseData, responseHeaders];
 	} catch (err: any) {
 		error = err.message;
 		console.error('API Request Error:', error);
-		return { error };
+		return [{ error }, null];
 	}
 };
 
