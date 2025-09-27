@@ -9,6 +9,8 @@ import math
 import time
 import psutil
 from functools import lru_cache
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -17,7 +19,7 @@ import aiohttp
 import aiofiles
 import requests
 import mimetypes
-from urllib.parse import quote
+from urllib.parse import urljoin, quote
 
 from fastapi import (
     Depends,
@@ -579,7 +581,7 @@ def transcription_handler(request, file_path, metadata):
     metadata = metadata or {}
 
     languages = [
-        metadata.get("language", None) if WHISPER_LANGUAGE == "" else WHISPER_LANGUAGE,
+        metadata.get("language", None) if not WHISPER_LANGUAGE else WHISPER_LANGUAGE,
         None,  # Always fallback to None in case transcription fails
     ]
 
