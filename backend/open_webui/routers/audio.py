@@ -1041,35 +1041,42 @@ def compress_audio(file_path):
 def split_audio(file_path, max_bytes=MAX_FILE_SIZE, format="mp3", bitrate="32k"):
     """
     Split audio into chunks not exceeding max_bytes (20MB).
-    Optimized version using ffmpeg segment muxer for efficiency.
+    Returns only valid chunks (size > 0 and duration > 1s).
     """
     start_time = time.time()
     start_memory = get_memory_usage()
 
     file_size = os.path.getsize(file_path)
     log.info(f"[SPLIT] Starting split of {file_size/(1024*1024):.1f}MB file")
-    log.info(
-        f"[MEMORY] Initial: RSS={start_memory['rss']:.1f}MB, VMS={start_memory['vms']:.1f}MB")
+    log.info(f"[MEMORY] Initial: RSS={start_memory['rss']:.1f}MB, VMS={start_memory['vms']:.1f}MB")
 
     if file_size <= max_bytes:
-        log.info(
-            f"[SPLIT] File size {file_size/(1024*1024):.1f}MB <= {max_bytes/(1024*1024):.1f}MB limit, no split needed")
+        log.info(f"[SPLIT] File size {file_size/(1024*1024):.1f}MB <= {max_bytes/(1024*1024):.1f}MB limit, no split needed")
         return [file_path]
 
     base, _ = os.path.splitext(file_path)
 
-    # First, try the most efficient method: ffmpeg segment muxer
-    chunks = split_audio_segment_muxer(
-        file_path, base, max_bytes, format, bitrate)
-    if chunks:
-        log_performance("Split (segment muxer)", start_time, start_memory)
-        return chunks
-
+    # Try segment muxer first
+    chunks = split_audio_segment_muxer(file_path, base, max_bytes, format, bitrate)
     # Fallback to manual chunking if segment muxer fails
-    log.info("[SPLIT] Segment muxer failed, trying manual chunking")
-    chunks = split_audio_manual(file_path, base, max_bytes, format, bitrate)
-    log_performance("Split (manual)", start_time, start_memory)
-    return chunks
+    if not chunks:
+        log.info("[SPLIT] Segment muxer failed, trying manual chunking")
+        chunks = split_audio_manual(file_path, base, max_bytes, format, bitrate)
+
+    # Filter out invalid chunks
+    valid_chunks = []
+    for chunk in chunks:
+        if os.path.exists(chunk) and os.path.getsize(chunk) > 0:
+            duration = get_audio_duration_ffmpeg(chunk)
+            if duration > 1.0:
+                valid_chunks.append(chunk)
+            else:
+                os.remove(chunk)
+        elif os.path.exists(chunk):
+            os.remove(chunk)
+    log.info(f"[SPLIT] Returning {len(valid_chunks)} valid chunks")
+    log_performance("Split", start_time, start_memory)
+    return valid_chunks
 
 
 def split_audio_segment_muxer(file_path, base_name, max_bytes, format="mp3", bitrate="32k"):
@@ -1087,8 +1094,7 @@ def split_audio_segment_muxer(file_path, base_name, max_bytes, format="mp3", bit
             return []
 
         # Calculate segment time based on bitrate and max size (20MB)
-        bitrate_numeric = int(bitrate.rstrip('k')) * \
-            1000  # 32k = 32000 bits/second
+        bitrate_numeric = int(bitrate.rstrip('k')) * 1000  # 32k = 32000 bits/second
 
         # Maximum seconds for 20MB at given bitrate with 90% safety margin
         max_seconds = (max_bytes * 8 * 0.9) / bitrate_numeric
