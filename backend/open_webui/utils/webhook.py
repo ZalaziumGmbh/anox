@@ -38,7 +38,7 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict) -> b
                 "summary": message,
                 "sections": [
                     {
-                        "activityTitle": f"{message}, Environment: {event_data.get("environment")}",
+                        "activityTitle": f"{message}, Environment: {event_data.get('environment')}",
                         "activitySubtitle": f"{name} ({VERSION}) - {action}",
                         "activityImage": WEBUI_FAVICON_URL,
                         "facts": facts,
