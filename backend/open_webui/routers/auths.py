@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 import time
@@ -643,7 +644,8 @@ async def signup(request: Request, response: Response, form_data: SignupForm):
                     {
                         "action": "signup",
                         "message": WEBHOOK_MESSAGES.USER_SIGNUP(user.name),
-                        "user": user.model_dump_json(exclude_none=True),
+                        "user": user.model_dump_json(exclude_none=True, exclude={"profile_image_url"}),
+                        "environment": os.environ.get("DOMAIN_ANOX", "development"),
                     },
                 )
 
