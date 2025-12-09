@@ -138,7 +138,16 @@ ldap3==2.9.1
 ## Firecrawl
 firecrawl-py==4.10.0
 
+#OCR Libraries
+pdfminer.six>=20221105
+pi_heif>=0.7.0
+pdf2image>=1.16.0
+unstructured_inference>=0.3.0
+unstructured_pytesseract>=0.3.0
+pytesseract>=0.3.10
+
 ## Trace
+
 opentelemetry-api==1.38.0
 opentelemetry-sdk==1.38.0
 opentelemetry-exporter-otlp==1.38.0

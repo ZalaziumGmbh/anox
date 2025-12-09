@@ -4,12 +4,12 @@ import json
 import logging
 import os
 import uuid
-import html
-import base64
 import subprocess
 import math
 import time
 import psutil
+import html
+import base64
 from functools import lru_cache
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
@@ -1056,7 +1056,9 @@ def transcription_handler(request, file_path, metadata, user=None):
             )
 
 
-def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None, user=None):
+def transcribe(
+    request: Request, file_path: str, metadata: Optional[dict] = None, user=None
+):
     log.info(f"transcribe: {file_path} {metadata}")
 
     # Track overall time and memory
@@ -1100,9 +1102,7 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
         
         with ThreadPoolExecutor() as executor:
             futures = [
-                executor.submit(
-                    transcription_handler, request, chunk_path, metadata, user
-                )
+                executor.submit(transcription_handler, request, chunk_path, metadata)
                 for chunk_path in chunk_paths
             ]
             
