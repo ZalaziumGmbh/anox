@@ -1480,7 +1480,7 @@ def get_memory_usage():
         memory_info = process.memory_info()
         return {
             'rss': memory_info.rss / (1024 * 1024),  # MB
-            'vms': memory_info.vms / (1024 * 1024),  # MB
+            'vms': memory_info.vms / (1024 * 1024),  # MB 
             'percent': process.memory_percent()
         }
     except:
