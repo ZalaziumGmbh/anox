@@ -1,3 +1,4 @@
+import base64
 import requests
 import aiohttp
 import asyncio
@@ -37,6 +38,8 @@ class MistralLoader:
         timeout: int = 300,  # 5 minutes default
         max_retries: int = 3,
         enable_debug_logging: bool = False,
+        use_base64: bool = False,
+        model: str = "mistral-ocr-latest",
     ):
         """
         Initializes the loader with enhanced features.
@@ -61,6 +64,8 @@ class MistralLoader:
         self.timeout = timeout
         self.max_retries = max_retries
         self.debug = enable_debug_logging
+        self.use_base64 = use_base64
+        self.model = model if model else "mistral-ocr-latest"
 
         # PERFORMANCE OPTIMIZATION: Differentiated timeouts for different operations
         # This prevents long-running OCR operations from affecting quick operations
@@ -381,7 +386,7 @@ class MistralLoader:
             "Accept": "application/json",
         }
         payload = {
-            "model": "mistral-ocr-latest",
+            "model": self.model,
             "document": {
                 "type": "document_url",
                 "document_url": signed_url,
@@ -417,7 +422,7 @@ class MistralLoader:
         }
 
         payload = {
-            "model": "mistral-ocr-latest",
+            "model": self.model,
             "document": {
                 "type": "document_url",
                 "document_url": signed_url,
@@ -439,6 +444,98 @@ class MistralLoader:
 
             processing_time = time.time() - start_time
             log.info(f"OCR processing completed in {processing_time:.2f}s")
+
+            return ocr_response
+
+        return await self._retry_request_async(ocr_request)
+
+    def _process_ocr_base64(self) -> Dict[str, Any]:
+        """Process OCR using base64-encoded document data (sync version).
+
+        Uses data URI format instead of file upload, enabling compatibility
+        with LLM proxies like LiteLLM that wrap providers such as Azure AI Foundry.
+        """
+        log.info("Processing OCR via Mistral API using base64 encoding")
+        url = f"{self.base_url}/ocr"
+        ocr_headers = {
+            **self.headers,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        with open(self.file_path, "rb") as f:
+            base64_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+        document_url = f"data:application/pdf;base64,{base64_data}"
+
+        payload = {
+            "model": self.model,
+            "document": {
+                "type": "document_url",
+                "document_url": document_url,
+            },
+            "include_image_base64": False,
+        }
+
+        def ocr_request():
+            response = requests.post(
+                url, headers=ocr_headers, json=payload, timeout=self.ocr_timeout
+            )
+            return self._handle_response(response)
+
+        try:
+            ocr_response = self._retry_request_sync(ocr_request)
+            log.info("OCR processing (base64) done.")
+            self._debug_log("OCR response: %s", ocr_response)
+            return ocr_response
+        except Exception as e:
+            log.error(f"Failed during OCR processing (base64): {e}")
+            raise
+
+    async def _process_ocr_base64_async(
+        self, session: aiohttp.ClientSession
+    ) -> Dict[str, Any]:
+        """Async OCR processing using base64-encoded document data.
+
+        Uses data URI format instead of file upload, enabling compatibility
+        with LLM proxies like LiteLLM that wrap providers such as Azure AI Foundry.
+        """
+        url = f"{self.base_url}/ocr"
+
+        headers = {
+            **self.headers,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        with open(self.file_path, "rb") as f:
+            base64_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+        document_url = f"data:application/pdf;base64,{base64_data}"
+
+        payload = {
+            "model": self.model,
+            "document": {
+                "type": "document_url",
+                "document_url": document_url,
+            },
+            "include_image_base64": False,
+        }
+
+        async def ocr_request():
+            log.info("Starting OCR processing via Mistral API (base64)")
+            start_time = time.time()
+
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=self.ocr_timeout),
+            ) as response:
+                ocr_response = await self._handle_response_async(response)
+
+            processing_time = time.time() - start_time
+            log.info(f"OCR processing (base64) completed in {processing_time:.2f}s")
 
             return ocr_response
 
@@ -602,14 +699,19 @@ class MistralLoader:
         start_time = time.time()
 
         try:
-            # 1. Upload file
-            file_id = self._upload_file()
+            if self.use_base64:
+                # Base64 path: encode file and send directly (no upload/cleanup needed)
+                ocr_response = self._process_ocr_base64()
+            else:
+                # Standard path: upload, get URL, process OCR
+                # 1. Upload file
+                file_id = self._upload_file()
 
-            # 2. Get Signed URL
-            signed_url = self._get_signed_url(file_id)
+                # 2. Get Signed URL
+                signed_url = self._get_signed_url(file_id)
 
-            # 3. Process OCR
-            ocr_response = self._process_ocr(signed_url)
+                # 3. Process OCR
+                ocr_response = self._process_ocr(signed_url)
 
             # 4. Process results
             documents = self._process_results(ocr_response)
@@ -659,14 +761,19 @@ class MistralLoader:
 
         try:
             async with self._get_session() as session:
-                # 1. Upload file with streaming
-                file_id = await self._upload_file_async(session)
+                if self.use_base64:
+                    # Base64 path: encode file and send directly (no upload/cleanup needed)
+                    ocr_response = await self._process_ocr_base64_async(session)
+                else:
+                    # Standard path: upload, get URL, process OCR
+                    # 1. Upload file with streaming
+                    file_id = await self._upload_file_async(session)
 
-                # 2. Get signed URL
-                signed_url = await self._get_signed_url_async(session, file_id)
+                    # 2. Get signed URL
+                    signed_url = await self._get_signed_url_async(session, file_id)
 
-                # 3. Process OCR
-                ocr_response = await self._process_ocr_async(session, signed_url)
+                    # 3. Process OCR
+                    ocr_response = await self._process_ocr_async(session, signed_url)
 
                 # 4. Process results
                 documents = self._process_results(ocr_response)
