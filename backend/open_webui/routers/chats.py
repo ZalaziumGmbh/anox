@@ -22,6 +22,8 @@ from open_webui.models.chats import (
     ChatBody,
     ChatHistoryStats,
     MessageStats,
+    slim_chat_sources,
+    repair_chat_history,
 )
 from open_webui.models.tags import TagModel, Tags
 from open_webui.models.folders import Folders
@@ -908,7 +910,9 @@ async def get_shared_chat_by_id(
         chat = Chats.get_chat_by_id(share_id, db=db)
 
     if chat:
-        return ChatResponse(**chat.model_dump())
+        chat_dict = chat.model_dump()
+        chat_dict["chat"] = slim_chat_sources(chat_dict["chat"])
+        return ChatResponse(**chat_dict)
 
     else:
         raise HTTPException(
@@ -957,7 +961,14 @@ async def get_chat_by_id(
     chat = Chats.get_chat_by_id_and_user_id(id, user.id, db=db)
 
     if chat:
-        return ChatResponse(**chat.model_dump())
+        chat_dict = chat.model_dump()
+        # Auto-repair broken parentId chains (persists fix to DB)
+        repaired_chat, was_repaired = repair_chat_history(chat_dict["chat"])
+        if was_repaired:
+            Chats.update_chat_by_id(id, repaired_chat, db=db)
+            chat_dict["chat"] = repaired_chat
+        chat_dict["chat"] = slim_chat_sources(chat_dict["chat"])
+        return ChatResponse(**chat_dict)
 
     else:
         raise HTTPException(
@@ -981,7 +992,9 @@ async def update_chat_by_id(
     if chat:
         updated_chat = {**chat.chat, **form_data.chat}
         chat = Chats.update_chat_by_id(id, updated_chat, db=db)
-        return ChatResponse(**chat.model_dump())
+        chat_dict = chat.model_dump()
+        chat_dict["chat"] = slim_chat_sources(chat_dict["chat"])
+        return ChatResponse(**chat_dict)
     else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -1048,7 +1061,9 @@ async def update_chat_message_by_id(
             }
         )
 
-    return ChatResponse(**chat.model_dump())
+    chat_dict = chat.model_dump()
+    chat_dict["chat"] = slim_chat_sources(chat_dict["chat"])
+    return ChatResponse(**chat_dict)
 
 
 ############################
