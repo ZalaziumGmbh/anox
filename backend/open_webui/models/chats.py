@@ -33,6 +33,222 @@ from sqlalchemy.sql.expression import bindparam
 
 log = logging.getLogger(__name__)
 
+####################
+# Chat History Repair
+####################
+
+
+def repair_chat_history(chat_dict: dict) -> tuple[dict, bool]:
+    """Detect and fix broken parentId chains in chat history.
+
+    If currentId points to a message with a broken parent chain,
+    finds the longest valid chain and sets currentId to its end.
+    Returns (fixed_chat_dict, was_repaired).
+    """
+    history = chat_dict.get("history", {})
+    messages = history.get("messages", {})
+    current_id = history.get("currentId")
+
+    if not current_id or not messages:
+        return chat_dict, False
+
+    # Walk chain from currentId — how far can we go?
+    chain_len = 0
+    msg_id = current_id
+    visited = set()
+    while msg_id and msg_id in messages:
+        if msg_id in visited:
+            break
+        visited.add(msg_id)
+        chain_len += 1
+        msg_id = messages[msg_id].get("parentId")
+
+    # Check if currentId itself is missing or has a broken parent
+    current_missing = current_id not in messages
+    cur_msg = messages.get(current_id, {})
+    parent_id = cur_msg.get("parentId")
+    parent_broken = parent_id is not None and parent_id not in messages
+
+    # No repair needed if currentId exists, parent is valid, and chain covers most messages
+    if not current_missing and not parent_broken and chain_len >= len(messages) - 5:
+        return chat_dict, False
+
+    # Find the leaf with the longest chain back to a root
+    best_leaf = None
+    best_len = 0
+    for mid, m in messages.items():
+        children = m.get("childrenIds", [])
+        has_child_in_dict = any(cid in messages for cid in children)
+        if has_child_in_dict:
+            continue
+        # This is a leaf — walk back to root
+        length = 0
+        walk_id = mid
+        seen = set()
+        while walk_id and walk_id in messages:
+            if walk_id in seen:
+                break
+            seen.add(walk_id)
+            length += 1
+            walk_id = messages[walk_id].get("parentId")
+        if length > best_len:
+            best_len = length
+            best_leaf = mid
+
+    if not best_leaf or (best_len < chain_len) or \
+       (best_len == chain_len and not current_missing and not parent_broken):
+        return chat_dict, False
+
+    log.info(
+        f"Repaired chat history: currentId chain {chain_len} -> {best_len} messages"
+    )
+    result = {**chat_dict}
+    result["history"] = {**history, "currentId": best_leaf}
+    return result, True
+
+
+####################
+# Chat Response Slimming
+####################
+
+_SOURCE_KEEP_FIELDS = frozenset(("id", "name", "url", "embed_url", "type"))
+_MAX_DOC_CHUNKS = 5
+_MAX_DOC_CHUNK_LEN = 2000
+
+
+def _slim_sources_list(sources: list) -> tuple[list, bool]:
+    """Slim a list of source entries. Returns (slimmed_list, was_modified)."""
+    changed = False
+    new_sources = []
+    for src_entry in sources:
+        if not isinstance(src_entry, dict):
+            new_sources.append(src_entry)
+            continue
+
+        new_entry = {**src_entry}
+
+        # Slim the source object — keep only fields the frontend uses
+        source_obj = src_entry.get("source")
+        if isinstance(source_obj, dict):
+            slim_source = {
+                k: v
+                for k, v in source_obj.items()
+                if k in _SOURCE_KEEP_FIELDS
+            }
+            if len(source_obj) > len(slim_source):
+                changed = True
+            new_entry["source"] = slim_source
+
+        # Limit document chunks to reduce payload
+        docs = src_entry.get("document")
+        if isinstance(docs, list) and len(docs) > _MAX_DOC_CHUNKS:
+            new_entry["document"] = [
+                d[:_MAX_DOC_CHUNK_LEN] if isinstance(d, str) else d
+                for d in docs[:_MAX_DOC_CHUNKS]
+            ]
+            changed = True
+        elif isinstance(docs, list):
+            trimmed_docs = []
+            doc_changed = False
+            for d in docs:
+                if isinstance(d, str) and len(d) > _MAX_DOC_CHUNK_LEN:
+                    trimmed_docs.append(d[:_MAX_DOC_CHUNK_LEN])
+                    doc_changed = True
+                else:
+                    trimmed_docs.append(d)
+            if doc_changed:
+                new_entry["document"] = trimmed_docs
+                changed = True
+
+        # Limit metadata/distances to match trimmed documents
+        if "document" in new_entry:
+            doc_count = len(new_entry["document"])
+            meta = src_entry.get("metadata")
+            if isinstance(meta, list) and len(meta) > doc_count:
+                new_entry["metadata"] = meta[:doc_count]
+            dists = src_entry.get("distances")
+            if isinstance(dists, list) and len(dists) > doc_count:
+                new_entry["distances"] = dists[:doc_count]
+
+        new_sources.append(new_entry)
+    return new_sources, changed
+
+
+def slim_chat_sources(chat_dict: dict) -> dict:
+    """Strip heavy, unused data from message sources in the API response.
+
+    Processes both history.messages (dict) and top-level messages (list).
+    All messages are preserved — only per-message payload is reduced.
+    - Removes source.user and extra source fields not used by the frontend
+    - Limits document chunks to _MAX_DOC_CHUNKS with max _MAX_DOC_CHUNK_LEN chars
+    - Strips base64 data URLs from top-level messages list (kept in history.messages)
+    """
+    changed = False
+    result = {**chat_dict}
+
+    # Process history.messages (dict keyed by ID)
+    history = chat_dict.get("history", {})
+    hist_messages = history.get("messages", {})
+    if hist_messages:
+        slimmed_hist = {}
+        for msg_id, msg in hist_messages.items():
+            sources = msg.get("sources")
+            if not sources or not isinstance(sources, list):
+                slimmed_hist[msg_id] = msg
+                continue
+            new_sources, did_change = _slim_sources_list(sources)
+            if did_change:
+                changed = True
+            slimmed_hist[msg_id] = {**msg, "sources": new_sources}
+        if changed:
+            result["history"] = {**history, "messages": slimmed_hist}
+
+    # Process top-level messages (list format used by newer Open WebUI).
+    # The frontend prefers history.messages when available, so we can
+    # aggressively strip from here: slim sources AND remove base64 file data.
+    top_messages = chat_dict.get("messages")
+    if isinstance(top_messages, list):
+        slimmed_top = []
+        for msg in top_messages:
+            if not isinstance(msg, dict):
+                slimmed_top.append(msg)
+                continue
+
+            new_msg = {**msg}
+
+            # Slim sources
+            sources = msg.get("sources")
+            if sources and isinstance(sources, list):
+                new_sources, did_change = _slim_sources_list(sources)
+                if did_change:
+                    changed = True
+                new_msg["sources"] = new_sources
+
+            # Strip base64 data URLs from files (kept in history.messages)
+            files = msg.get("files")
+            if isinstance(files, list):
+                new_files = []
+                for f in files:
+                    if isinstance(f, dict):
+                        url = f.get("url", "")
+                        if isinstance(url, str) and url.startswith("data:") and len(url) > 1000:
+                            new_files.append({**f, "url": ""})
+                            changed = True
+                        else:
+                            new_files.append(f)
+                    else:
+                        new_files.append(f)
+                new_msg["files"] = new_files
+
+            slimmed_top.append(new_msg)
+        if changed:
+            result["messages"] = slimmed_top
+
+    if not changed:
+        return chat_dict
+
+    return result
+
 
 class Chat(Base):
     __tablename__ = "chat"
