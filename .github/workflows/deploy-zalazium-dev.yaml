@@ -20,7 +20,7 @@ jobs:
       
       # Build a Docker image of your application and tag the image with the latest commit SHA
       - name: Build container image
-        run: docker build -t ${{ secrets.DOCKER_USER }}/anox:dev .
+        run: docker build --no-cache -t ${{ secrets.DOCKER_USER }}/anox:dev .
       
       # Push image to Docker Hub
       - name: Push image to Docker Hub
