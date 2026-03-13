@@ -1,7 +1,3 @@
-"""
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-"""
-
 from pymilvus import MilvusClient as Client
 from pymilvus import FieldSchema, DataType
 from pymilvus import connections, Collection

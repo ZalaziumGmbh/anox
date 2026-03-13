@@ -1,6 +1,4 @@
 """
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-
 Oracle 23ai Vector Database Client - Fixed Version
 
 # .env

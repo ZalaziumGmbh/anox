@@ -1,7 +1,3 @@
-"""
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-"""
-
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 from typing import Optional

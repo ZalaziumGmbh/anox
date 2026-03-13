@@ -120,12 +120,12 @@ def setup_metrics(app: FastAPI, resource: Resource) -> None:
     # Instruments
     request_counter = meter.create_counter(
         name="http.server.requests",
-        description="Counts the total number of inbound HTTP requests.",
+        description="Total HTTP requests",
         unit="1",
     )
     duration_histogram = meter.create_histogram(
         name="http.server.duration",
-        description="Measures the duration of inbound HTTP requests.",
+        description="HTTP request duration",
         unit="ms",
     )
 

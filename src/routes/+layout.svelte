@@ -34,10 +34,8 @@
 		terminalServers,
 		showControls,
 		showFileNavPath,
-		showFileNavDir,
-		pyodideWorker
+		showFileNavDir
 	} from '$lib/stores';
-	import { getFileContentById } from '$lib/apis/files';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { beforeNavigate } from '$app/navigation';
@@ -186,20 +184,7 @@
 		});
 	};
 
-	/**
-	 * Get or create the persistent Pyodide worker.
-	 * The worker persists across executions so the virtual FS (IDBFS) is preserved.
-	 */
-	const getOrCreateWorker = () => {
-		let worker = $pyodideWorker;
-		if (!worker) {
-			worker = new PyodideWorker();
-			pyodideWorker.set(worker);
-		}
-		return worker;
-	};
-
-	const executePythonAsWorker = async (id, code, cb, files = []) => {
+	const executePythonAsWorker = async (id, code, cb) => {
 		let result = null;
 		let stdout = null;
 		let stderr = null;
@@ -221,44 +206,19 @@
 			/\bimport\s+pytz\b|\bfrom\s+pytz\b/.test(code) ? 'pytz' : null
 		].filter(Boolean);
 
-		const worker = getOrCreateWorker();
+		const pyodideWorker = new PyodideWorker();
 
-		// Fetch file content from the server and prepare for the worker
-		let filePayloads = [];
-		if (files && files.length > 0) {
-			for (const file of files) {
-				try {
-					const fileId = file?.id;
-					const fileName = file?.filename || file?.name || 'file';
-					if (fileId) {
-						const content = await getFileContentById(fileId);
-						if (content) {
-							filePayloads.push({ name: fileName, data: content });
-						}
-					}
-				} catch (e) {
-					console.error('Failed to fetch file for Pyodide:', e);
-				}
-			}
-		}
-
-		worker.postMessage({
-			type: 'execute',
+		pyodideWorker.postMessage({
 			id: id,
 			code: code,
-			packages: packages,
-			files: filePayloads.length > 0 ? filePayloads : undefined
+			packages: packages
 		});
 
-		// Timeout for this specific execution (not the worker itself)
-		let timeoutId = setTimeout(() => {
+		setTimeout(() => {
 			if (executing) {
 				executing = false;
 				stderr = 'Execution Time Limit Exceeded';
-
-				// Terminate and recreate the worker on timeout
-				worker.terminate();
-				pyodideWorker.set(null);
+				pyodideWorker.terminate();
 
 				if (cb) {
 					cb(
@@ -277,18 +237,11 @@
 			}
 		}, 60000);
 
-		// Use addEventListener so multiple concurrent executions don't clobber each other
-		const onMessage = (event) => {
-			const { id: eventId, ...data } = event.data;
-			// Only handle responses for this execution ID
-			if (eventId !== id) return;
-			// Ignore FS responses (they use a type field)
-			if (data.type && data.type.startsWith('fs:')) return;
-
+		pyodideWorker.onmessage = (event) => {
 			console.log('pyodideWorker.onmessage', event);
-			clearTimeout(timeoutId);
-			worker.removeEventListener('message', onMessage);
-			worker.removeEventListener('error', onError);
+			const { id, ...data } = event.data;
+
+			console.log(id, data);
 
 			data['stdout'] && (stdout = data['stdout']);
 			data['stderr'] && (stderr = data['stderr']);
@@ -312,11 +265,8 @@
 			executing = false;
 		};
 
-		const onError = (event) => {
+		pyodideWorker.onerror = (event) => {
 			console.log('pyodideWorker.onerror', event);
-			clearTimeout(timeoutId);
-			worker.removeEventListener('message', onMessage);
-			worker.removeEventListener('error', onError);
 
 			if (cb) {
 				cb(
@@ -334,9 +284,6 @@
 			}
 			executing = false;
 		};
-
-		worker.addEventListener('message', onMessage);
-		worker.addEventListener('error', onError);
 	};
 
 	const resolveToolServer = (serverUrl) => {
@@ -476,7 +423,7 @@
 		} else if (data?.session_id === $socket.id) {
 			if (type === 'execute:python') {
 				console.log('execute:python', data);
-				executePythonAsWorker(data.id, data.code, cb, data.files || []);
+				executePythonAsWorker(data.id, data.code, cb);
 			} else if (type === 'execute:tool') {
 				console.log('execute:tool', data);
 				executeTool(data, cb);

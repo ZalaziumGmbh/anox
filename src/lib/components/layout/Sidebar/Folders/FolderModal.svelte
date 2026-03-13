@@ -19,7 +19,6 @@
 	export let onSubmit: Function = (e) => {};
 
 	export let folderId = null;
-	export let parentId = null;
 	export let edit = false;
 
 	let folder = null;
@@ -56,8 +55,7 @@
 		await onSubmit({
 			name,
 			meta,
-			data,
-			parent_id: edit ? undefined : parentId
+			data
 		});
 		show = false;
 		loading = false;

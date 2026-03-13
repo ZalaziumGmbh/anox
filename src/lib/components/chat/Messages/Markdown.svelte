@@ -36,8 +36,6 @@
 
 	let tokens = [];
 	let pendingUpdate = null;
-	let lastContent = '';
-	let lastParsedContent = '';
 
 	const options = {
 		throwOnError: false,
@@ -58,35 +56,24 @@
 	});
 
 	const parseTokens = () => {
-		if (content === lastContent) return;
-		lastContent = content;
-
-		const processed = replaceTokens(processResponseContent(content), model?.name, $user?.name);
-		if (processed === lastParsedContent) return;
-		lastParsedContent = processed;
-
-		tokens = marked.lexer(processed);
+		tokens = marked.lexer(replaceTokens(processResponseContent(content), model?.name, $user?.name));
 	};
-
-	const updateHandler = (content) => {
-		if (content) {
-			if (done) {
-				cancelAnimationFrame(pendingUpdate);
-				pendingUpdate = null;
-				parseTokens();
-			} else if (!pendingUpdate) {
-				pendingUpdate = requestAnimationFrame(() => {
-					pendingUpdate = null;
-					parseTokens();
-				});
-			}
-		}
-	};
-
-	$: updateHandler(content);
 
 	// Throttle parsing to once per animation frame while streaming
-	$: onDestroy(() => {
+	$: if (content) {
+		if (done) {
+			cancelAnimationFrame(pendingUpdate);
+			pendingUpdate = null;
+			parseTokens();
+		} else if (!pendingUpdate) {
+			pendingUpdate = requestAnimationFrame(() => {
+				pendingUpdate = null;
+				parseTokens();
+			});
+		}
+	}
+
+	onDestroy(() => {
 		cancelAnimationFrame(pendingUpdate);
 	});
 </script>

@@ -1,7 +1,3 @@
-"""
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-"""
-
 from open_webui.retrieval.vector.utils import process_metadata
 from open_webui.retrieval.vector.main import (
     VectorDBBase,
@@ -65,11 +61,6 @@ class S3VectorClient(VectorDBBase):
                 dataType=data_type,
                 dimension=dimension,
                 distanceMetric=distance_metric,
-                metadataConfiguration={
-                    "nonFilterableMetadataKeys": [
-                        "text",
-                    ]
-                },
             )
             log.info(
                 f"Created S3 index: {index_name} (dim={dimension}, type={data_type}, metric={distance_metric})"

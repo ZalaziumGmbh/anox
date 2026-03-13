@@ -1416,52 +1416,46 @@ app.add_middleware(RedirectMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
 
-class APIKeyRestrictionMiddleware:
-    def __init__(self, app):
-        self.app = app
+class APIKeyRestrictionMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        auth_header = request.headers.get("Authorization")
+        token = None
 
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            request = Request(scope)
-            auth_header = request.headers.get("Authorization")
-            token = None
+        if auth_header:
+            parts = auth_header.split(" ", 1)
+            if len(parts) == 2:
+                token = parts[1]
 
-            if auth_header:
-                parts = auth_header.split(" ", 1)
-                if len(parts) == 2:
-                    token = parts[1]
+        # Only apply restrictions if an sk- API key is used
+        if token and token.startswith("sk-"):
+            # Check if restrictions are enabled
+            if request.app.state.config.ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS:
+                allowed_paths = [
+                    path.strip()
+                    for path in str(
+                        request.app.state.config.API_KEYS_ALLOWED_ENDPOINTS
+                    ).split(",")
+                    if path.strip()
+                ]
 
-            # Only apply restrictions if an sk- API key is used
-            if token and token.startswith("sk-"):
-                # Check if restrictions are enabled
-                if app.state.config.ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS:
-                    allowed_paths = [
-                        path.strip()
-                        for path in str(
-                            app.state.config.API_KEYS_ALLOWED_ENDPOINTS
-                        ).split(",")
-                        if path.strip()
-                    ]
+                request_path = request.url.path
 
-                    request_path = request.url.path
+                # Match exact path or prefix path
+                is_allowed = any(
+                    request_path == allowed or request_path.startswith(allowed + "/")
+                    for allowed in allowed_paths
+                )
 
-                    # Match exact path or prefix path
-                    is_allowed = any(
-                        request_path == allowed
-                        or request_path.startswith(allowed + "/")
-                        for allowed in allowed_paths
+                if not is_allowed:
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={
+                            "detail": "API key not allowed to access this endpoint."
+                        },
                     )
 
-                    if not is_allowed:
-                        await JSONResponse(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            content={
-                                "detail": "API key not allowed to access this endpoint."
-                            },
-                        )(scope, receive, send)
-                        return
-
-        await self.app(scope, receive, send)
+        response = await call_next(request)
+        return response
 
 
 app.add_middleware(APIKeyRestrictionMiddleware)
@@ -1750,8 +1744,8 @@ async def chat_completion(
         }
 
         # Check base model existence for custom models
-        if model_info and model_info.base_model_id:
-            base_model_id = model_info.base_model_id
+        if model_info_params.get("base_model_id"):
+            base_model_id = model_info_params.get("base_model_id")
             if base_model_id not in request.app.state.MODELS:
                 if ENABLE_CUSTOM_MODEL_FALLBACK:
                     default_models = (
@@ -1882,7 +1876,7 @@ async def chat_completion(
                                 "model": model_id,
                             },
                         )
-                except Exception:
+                except:
                     pass
 
             ctx = build_chat_response_context(
@@ -1929,7 +1923,7 @@ async def chat_completion(
                         {"type": "chat:tasks:cancel"},
                     )
 
-                except Exception:
+                except:
                     pass
         finally:
             try:
@@ -2211,7 +2205,6 @@ async def get_app_config(request: Request):
                 "user_count": user_count,
                 "code": {
                     "engine": app.state.config.CODE_EXECUTION_ENGINE,
-                    "interpreter_engine": app.state.config.CODE_INTERPRETER_ENGINE,
                 },
                 "audio": {
                     "tts": {

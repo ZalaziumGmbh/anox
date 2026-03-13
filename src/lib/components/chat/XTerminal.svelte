@@ -20,7 +20,6 @@
 	export let connected = false;
 	export let connecting = false;
 	let resizeObserver: ResizeObserver | null = null;
-	let pingInterval: ReturnType<typeof setInterval> | null = null;
 
 	// Resolve the active terminal server's info for the WebSocket URL
 	const getTerminalInfo = (): { serverId: string; baseUrl: string } | null => {
@@ -109,13 +108,6 @@
 				if (term && ws) {
 					ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
 				}
-				// Keepalive ping to prevent idle timeout from proxies/LBs
-				if (pingInterval) clearInterval(pingInterval);
-				pingInterval = setInterval(() => {
-					if (ws && ws.readyState === WebSocket.OPEN) {
-						ws.send(JSON.stringify({ type: 'ping' }));
-					}
-				}, 25000);
 			};
 
 			ws.onmessage = (event) => {
@@ -149,10 +141,6 @@
 	};
 
 	const disconnect = () => {
-		if (pingInterval) {
-			clearInterval(pingInterval);
-			pingInterval = null;
-		}
 		if (ws) {
 			ws.close();
 			ws = null;
@@ -241,10 +229,8 @@
 		});
 		resizeObserver.observe(terminalEl);
 
-		// Connection is handled by the reactive block below (which fires
-		// when `term` is set here), so we intentionally do NOT call
-		// connect() to avoid creating a duplicate WebSocket whose onclose
-		// handler would write a spurious "[Connection closed]" message.
+		// Auto-connect
+		connect();
 	};
 
 	// Reconnect when the selected terminal changes

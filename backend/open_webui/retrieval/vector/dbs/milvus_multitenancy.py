@@ -1,7 +1,3 @@
-"""
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-"""
-
 import logging
 from typing import Optional, Tuple, List, Dict, Any
 

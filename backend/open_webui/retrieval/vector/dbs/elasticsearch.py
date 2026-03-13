@@ -1,7 +1,3 @@
-"""
-NOTE: This vector database integration is community-supported and maintained on a best-effort basis.
-"""
-
 from elasticsearch import Elasticsearch, BadRequestError
 from typing import Optional
 import ssl
