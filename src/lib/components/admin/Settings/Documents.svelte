@@ -193,6 +193,13 @@
 			toast.error($i18n.t('MinerU API Key required for Cloud API mode.'));
 			return;
 		}
+		if (
+			RAGConfig.CONTENT_EXTRACTION_ENGINE === 'vision_llm' &&
+			(!RAGConfig.VISION_LLM_API_BASE_URL || !RAGConfig.VISION_LLM_MODEL)
+		) {
+			toast.error($i18n.t('Vision LLM API Base URL and Model are required.'));
+			return;
+		}
 
 		if (!RAGConfig.BYPASS_EMBEDDING_AND_RETRIEVAL) {
 			await embeddingModelUpdateHandler();
@@ -350,6 +357,7 @@
 									<option value="datalab_marker">{$i18n.t('Datalab Marker API')}</option>
 									<option value="document_intelligence">{$i18n.t('Document Intelligence')}</option>
 									<option value="mistral_ocr">{$i18n.t('Mistral OCR')}</option>
+									<option value="vision_llm">{$i18n.t('Vision LLM')}</option>
 									<option value="mineru">{$i18n.t('MinerU')}</option>
 								</select>
 							</div>
@@ -673,6 +681,104 @@
 									</Tooltip>
 								</div>
 								<Switch bind:state={RAGConfig.MISTRAL_OCR_USE_BASE64} />
+							</div>
+						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'vision_llm'}
+							<div class="my-0.5 flex gap-2 pr-2">
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter Vision LLM API Base URL (e.g. http://localhost:4000/v1)')}
+									bind:value={RAGConfig.VISION_LLM_API_BASE_URL}
+								/>
+								<SensitiveInput
+									placeholder={$i18n.t('Enter API Key')}
+									required={false}
+									bind:value={RAGConfig.VISION_LLM_API_KEY}
+								/>
+							</div>
+
+							<div class="my-0.5 flex flex-col w-full">
+								<div class="mb-1 text-xs font-medium">
+									{$i18n.t('Vision Model')}
+								</div>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									placeholder={$i18n.t('Enter model name (e.g. glm-ocr)')}
+									bind:value={RAGConfig.VISION_LLM_MODEL}
+								/>
+							</div>
+
+							<div class="my-0.5 flex flex-col w-full mt-2">
+								<div class="mb-1 text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Custom prompt sent with each image. Default: "Extract all text from this image accurately. Output the content as clean markdown."'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Extraction Prompt')}
+									</Tooltip>
+								</div>
+								<Textarea
+									bind:value={RAGConfig.VISION_LLM_PROMPT}
+									placeholder={$i18n.t('Enter custom extraction prompt (optional)')}
+								/>
+							</div>
+
+							<div class="flex justify-between w-full mt-2">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Maximum tokens for the model response per page. Default: 8192.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Max Tokens')}
+									</Tooltip>
+								</div>
+								<input
+									type="number"
+									class="w-20 text-sm bg-transparent outline-hidden text-right"
+									placeholder="8192"
+									bind:value={RAGConfig.VISION_LLM_MAX_TOKENS}
+								/>
+							</div>
+
+							<div class="flex justify-between w-full mt-2">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'DPI for rendering PDF pages to images. Higher values improve quality but increase processing time. Default: 200.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Image DPI')}
+									</Tooltip>
+								</div>
+								<input
+									type="number"
+									class="w-20 text-sm bg-transparent outline-hidden text-right"
+									placeholder="200"
+									bind:value={RAGConfig.VISION_LLM_IMAGE_DPI}
+								/>
+							</div>
+
+							<div class="flex justify-between w-full mt-2">
+								<div class="self-center text-xs font-medium">
+									<Tooltip
+										content={$i18n.t(
+											'Max input context tokens for the vision model. Used to auto-scale DPI. Default: 32768.'
+										)}
+										placement="top-start"
+									>
+										{$i18n.t('Max Context Tokens')}
+									</Tooltip>
+								</div>
+								<input
+									type="number"
+									class="w-20 text-sm bg-transparent outline-hidden text-right"
+									placeholder="32768"
+									bind:value={RAGConfig.VISION_LLM_MAX_CONTEXT_TOKENS}
+								/>
 							</div>
 						{:else if RAGConfig.CONTENT_EXTRACTION_ENGINE === 'mineru'}
 							<!-- API Mode Selection -->

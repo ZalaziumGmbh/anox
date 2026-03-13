@@ -123,7 +123,8 @@ def process_uploaded_file(
                         db=db_session,
                     )
                 elif (not content_type.startswith(("image/", "video/"))) or (
-                    request.app.state.config.CONTENT_EXTRACTION_ENGINE == "external"
+                    request.app.state.config.CONTENT_EXTRACTION_ENGINE
+                    in ("external", "vision_llm", "datalab_marker")
                 ):
                     process_file(
                         request,

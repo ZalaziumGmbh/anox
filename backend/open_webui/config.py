@@ -2839,6 +2839,49 @@ MISTRAL_OCR_MODEL = PersistentConfig(
     os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest"),
 )
 
+# Vision LLM settings (for self-hosted vision models via OpenAI-compatible API / LiteLLM)
+VISION_LLM_API_BASE_URL = PersistentConfig(
+    "VISION_LLM_API_BASE_URL",
+    "rag.vision_llm_api_base_url",
+    os.getenv("VISION_LLM_API_BASE_URL", ""),
+)
+
+VISION_LLM_API_KEY = PersistentConfig(
+    "VISION_LLM_API_KEY",
+    "rag.vision_llm_api_key",
+    os.getenv("VISION_LLM_API_KEY", ""),
+)
+
+VISION_LLM_MODEL = PersistentConfig(
+    "VISION_LLM_MODEL",
+    "rag.vision_llm_model",
+    os.getenv("VISION_LLM_MODEL", ""),
+)
+
+VISION_LLM_PROMPT = PersistentConfig(
+    "VISION_LLM_PROMPT",
+    "rag.vision_llm_prompt",
+    os.getenv("VISION_LLM_PROMPT", ""),
+)
+
+VISION_LLM_MAX_TOKENS = PersistentConfig(
+    "VISION_LLM_MAX_TOKENS",
+    "rag.vision_llm_max_tokens",
+    int(os.environ.get("VISION_LLM_MAX_TOKENS", "8192")),
+)
+
+VISION_LLM_IMAGE_DPI = PersistentConfig(
+    "VISION_LLM_IMAGE_DPI",
+    "rag.vision_llm_image_dpi",
+    int(os.environ.get("VISION_LLM_IMAGE_DPI", "200")),
+)
+
+VISION_LLM_MAX_CONTEXT_TOKENS = PersistentConfig(
+    "VISION_LLM_MAX_CONTEXT_TOKENS",
+    "rag.vision_llm_max_context_tokens",
+    int(os.environ.get("VISION_LLM_MAX_CONTEXT_TOKENS", "32768")),
+)
+
 BYPASS_EMBEDDING_AND_RETRIEVAL = PersistentConfig(
     "BYPASS_EMBEDDING_AND_RETRIEVAL",
     "rag.bypass_embedding_and_retrieval",
