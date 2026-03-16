@@ -29,6 +29,7 @@ from open_webui.retrieval.loaders.external_document import ExternalDocumentLoade
 from open_webui.retrieval.loaders.mistral import MistralLoader
 from open_webui.retrieval.loaders.datalab_marker import DatalabMarkerLoader
 from open_webui.retrieval.loaders.mineru import MinerULoader
+from open_webui.retrieval.loaders.vision_llm import VisionLLMLoader
 
 
 from open_webui.env import GLOBAL_LOG_LEVEL, REQUESTS_VERIFY
@@ -383,6 +384,22 @@ class Loader:
                 file_path=file_path,
                 use_base64=self.kwargs.get("MISTRAL_OCR_USE_BASE64", False),
                 model=self.kwargs.get("MISTRAL_OCR_MODEL", "mistral-ocr-latest"),
+            )
+        elif (
+            self.engine == "vision_llm"
+            and self.kwargs.get("VISION_LLM_API_BASE_URL")
+            and self.kwargs.get("VISION_LLM_MODEL")
+            and file_ext in VisionLLMLoader.SUPPORTED_EXTENSIONS
+        ):
+            loader = VisionLLMLoader(
+                api_base_url=self.kwargs.get("VISION_LLM_API_BASE_URL"),
+                api_key=self.kwargs.get("VISION_LLM_API_KEY", ""),
+                model=self.kwargs.get("VISION_LLM_MODEL"),
+                file_path=file_path,
+                prompt=self.kwargs.get("VISION_LLM_PROMPT", ""),
+                max_tokens=self.kwargs.get("VISION_LLM_MAX_TOKENS", 8192),
+                max_context_tokens=self.kwargs.get("VISION_LLM_MAX_CONTEXT_TOKENS", 32768),
+                image_dpi=self.kwargs.get("VISION_LLM_IMAGE_DPI", 200),
             )
         else:
             if file_ext == "pdf":

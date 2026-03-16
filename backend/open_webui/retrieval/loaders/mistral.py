@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import sys
+import tempfile
 import time
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
@@ -39,7 +40,8 @@ class MistralLoader:
         max_retries: int = 3,
         enable_debug_logging: bool = False,
         use_base64: bool = False,
-        model: str = "mistral-ocr-latest",
+        model: str = "mistral-ocr",
+        max_pages_per_request: int = 25,
     ):
         """
         Initializes the loader with enhanced features.
@@ -50,6 +52,7 @@ class MistralLoader:
             timeout: Request timeout in seconds.
             max_retries: Maximum number of retry attempts.
             enable_debug_logging: Enable detailed debug logs.
+            max_pages_per_request: Maximum pages per OCR API call (Mistral limit is 30).
         """
         if not api_key:
             raise ValueError("API key cannot be empty.")
@@ -65,7 +68,8 @@ class MistralLoader:
         self.max_retries = max_retries
         self.debug = enable_debug_logging
         self.use_base64 = use_base64
-        self.model = model if model else "mistral-ocr-latest"
+        self.model = model if model else "mistral-ocr"
+        self.max_pages_per_request = max_pages_per_request
 
         # PERFORMANCE OPTIMIZATION: Differentiated timeouts for different operations
         # This prevents long-running OCR operations from affecting quick operations
@@ -687,48 +691,143 @@ class MistralLoader:
 
         return documents
 
+    def _get_pdf_page_count(self) -> int:
+        """Get the number of pages in the PDF without fully parsing it."""
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(self.file_path)
+            return len(reader.pages)
+        except Exception as e:
+            log.warning(f"Could not determine PDF page count: {e}")
+            return 0
+
+    def _split_pdf(self) -> List[Dict[str, Any]]:
+        """Split a PDF into chunks of max_pages_per_request pages.
+        Returns a list of dicts with 'path', 'start_page', 'page_count'."""
+        from pypdf import PdfReader, PdfWriter
+
+        reader = PdfReader(self.file_path)
+        total_pages = len(reader.pages)
+        chunk_size = self.max_pages_per_request
+        chunks = []
+
+        for start in range(0, total_pages, chunk_size):
+            end = min(start + chunk_size, total_pages)
+            writer = PdfWriter()
+            for page_idx in range(start, end):
+                writer.add_page(reader.pages[page_idx])
+
+            temp_fd, temp_path = tempfile.mkstemp(suffix=".pdf")
+            os.close(temp_fd)
+            with open(temp_path, "wb") as f:
+                writer.write(f)
+            chunks.append({
+                "path": temp_path,
+                "start_page": start,
+                "page_count": end - start,
+            })
+            log.info(f"Created PDF chunk: pages {start + 1}-{end} of {total_pages}")
+
+        return chunks
+
+    def _make_chunk_loader(self, chunk_path: str) -> "MistralLoader":
+        """Create a loader instance for a PDF chunk, sharing config but with its own file path."""
+        return MistralLoader(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            file_path=chunk_path,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+            enable_debug_logging=self.debug,
+            use_base64=self.use_base64,
+            model=self.model,
+            max_pages_per_request=self.max_pages_per_request,
+        )
+
     def load(self) -> List[Document]:
         """
         Executes the full OCR workflow: upload, get URL, process OCR, delete file.
-        Synchronous version for backward compatibility.
+        Automatically splits PDFs exceeding the page limit into chunks.
 
         Returns:
             A list of Document objects, one for each page processed.
         """
-        file_id = None
         start_time = time.time()
 
         try:
-            if self.use_base64:
-                # Base64 path: encode file and send directly (no upload/cleanup needed)
-                ocr_response = self._process_ocr_base64()
-            else:
-                # Standard path: upload, get URL, process OCR
-                # 1. Upload file
-                file_id = self._upload_file()
+            page_count = self._get_pdf_page_count()
 
-                # 2. Get Signed URL
-                signed_url = self._get_signed_url(file_id)
+            # If within limit or can't determine page count, process as single file
+            if page_count <= self.max_pages_per_request:
+                return self._load_single_sync()
 
-                # 3. Process OCR
-                ocr_response = self._process_ocr(signed_url)
+            # Split and process chunks
+            log.info(
+                f"PDF has {page_count} pages (limit {self.max_pages_per_request}), "
+                f"splitting into chunks"
+            )
+            chunks = self._split_pdf()
+            all_documents = []
+            failed_chunks = 0
 
-            # 4. Process results
-            documents = self._process_results(ocr_response)
+            try:
+                for chunk_idx, chunk in enumerate(chunks):
+                    log.info(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
+                    try:
+                        chunk_loader = self._make_chunk_loader(chunk["path"])
+                        chunk_docs = chunk_loader._load_single_sync()
+
+                        # Fix page numbering and metadata for the original document
+                        for doc in chunk_docs:
+                            if "page" in doc.metadata:
+                                doc.metadata["page"] += chunk["start_page"]
+                                doc.metadata["page_label"] = doc.metadata["page"] + 1
+                            doc.metadata["total_pages"] = page_count
+                            doc.metadata["file_name"] = self.file_name
+                            doc.metadata["file_size"] = self.file_size
+
+                        all_documents.extend(chunk_docs)
+                    except Exception as e:
+                        failed_chunks += 1
+                        log.error(f"Chunk {chunk_idx + 1}/{len(chunks)} failed: {e}")
+                        all_documents.append(
+                            Document(
+                                page_content=f"[Error extracting pages {chunk['start_page'] + 1}-"
+                                f"{chunk['start_page'] + chunk['page_count']}: {e}]",
+                                metadata={
+                                    "page": chunk["start_page"],
+                                    "page_label": chunk["start_page"] + 1,
+                                    "total_pages": page_count,
+                                    "file_name": self.file_name,
+                                    "error": "chunk_failed",
+                                },
+                            )
+                        )
+            finally:
+                for chunk in chunks:
+                    try:
+                        os.unlink(chunk["path"])
+                    except OSError:
+                        pass
 
             total_time = time.time() - start_time
-            log.info(
-                f"Sync OCR workflow completed in {total_time:.2f}s, produced {len(documents)} documents"
-            )
+            status = f"{len(chunks)} chunks, {len(all_documents)} documents"
+            if failed_chunks:
+                status += f" ({failed_chunks} chunks failed)"
+            log.info(f"Chunked OCR completed in {total_time:.2f}s: {status}")
 
-            return documents
+            if not all_documents:
+                return [
+                    Document(
+                        page_content="No text content extracted from document",
+                        metadata={"error": "no_content", "file_name": self.file_name},
+                    )
+                ]
+            return all_documents
 
         except Exception as e:
             total_time = time.time() - start_time
-            log.error(
-                f"An error occurred during the loading process after {total_time:.2f}s: {e}"
-            )
-            # Return an error document on failure
+            log.error(f"OCR workflow failed after {total_time:.2f}s: {e}")
             return [
                 Document(
                     page_content=f"Error during processing: {e}",
@@ -738,52 +837,124 @@ class MistralLoader:
                     },
                 )
             ]
+
+    def _load_single_sync(self) -> List[Document]:
+        """Process the current file through the sync OCR workflow (upload or base64)."""
+        file_id = None
+        try:
+            if self.use_base64:
+                ocr_response = self._process_ocr_base64()
+            else:
+                file_id = self._upload_file()
+                signed_url = self._get_signed_url(file_id)
+                ocr_response = self._process_ocr(signed_url)
+            return self._process_results(ocr_response)
         finally:
-            # 5. Delete file (attempt even if prior steps failed after upload)
             if file_id:
                 try:
                     self._delete_file(file_id)
                 except Exception as del_e:
-                    # Log deletion error, but don't overwrite original error if one occurred
-                    log.error(
-                        f"Cleanup error: Could not delete file ID {file_id}. Reason: {del_e}"
-                    )
+                    log.error(f"Cleanup error: Could not delete file ID {file_id}. Reason: {del_e}")
+
+    async def _load_single_async(self) -> List[Document]:
+        """Process the current file through the async OCR workflow (upload or base64)."""
+        file_id = None
+        try:
+            async with self._get_session() as session:
+                if self.use_base64:
+                    ocr_response = await self._process_ocr_base64_async(session)
+                else:
+                    file_id = await self._upload_file_async(session)
+                    signed_url = await self._get_signed_url_async(session, file_id)
+                    ocr_response = await self._process_ocr_async(session, signed_url)
+            return self._process_results(ocr_response)
+        finally:
+            if file_id:
+                try:
+                    async with self._get_session() as session:
+                        await self._delete_file_async(session, file_id)
+                except Exception as del_e:
+                    log.error(f"Cleanup error: Could not delete file ID {file_id}. Reason: {del_e}")
 
     async def load_async(self) -> List[Document]:
         """
-        Asynchronous OCR workflow execution with optimized performance.
+        Asynchronous OCR workflow execution. Automatically splits PDFs exceeding
+        the page limit into chunks and processes each separately.
 
         Returns:
             A list of Document objects, one for each page processed.
         """
-        file_id = None
         start_time = time.time()
 
         try:
-            async with self._get_session() as session:
-                if self.use_base64:
-                    # Base64 path: encode file and send directly (no upload/cleanup needed)
-                    ocr_response = await self._process_ocr_base64_async(session)
-                else:
-                    # Standard path: upload, get URL, process OCR
-                    # 1. Upload file with streaming
-                    file_id = await self._upload_file_async(session)
+            page_count = self._get_pdf_page_count()
 
-                    # 2. Get signed URL
-                    signed_url = await self._get_signed_url_async(session, file_id)
+            # If within limit or can't determine page count, process as single file
+            if page_count <= self.max_pages_per_request:
+                return await self._load_single_async()
 
-                    # 3. Process OCR
-                    ocr_response = await self._process_ocr_async(session, signed_url)
+            # Split and process chunks
+            log.info(
+                f"PDF has {page_count} pages (limit {self.max_pages_per_request}), "
+                f"splitting into chunks"
+            )
+            chunks = self._split_pdf()
+            all_documents = []
+            failed_chunks = 0
 
-                # 4. Process results
-                documents = self._process_results(ocr_response)
+            try:
+                for chunk_idx, chunk in enumerate(chunks):
+                    log.info(f"Processing chunk {chunk_idx + 1}/{len(chunks)}")
+                    try:
+                        chunk_loader = self._make_chunk_loader(chunk["path"])
+                        chunk_docs = await chunk_loader._load_single_async()
 
-                total_time = time.time() - start_time
-                log.info(
-                    f"Async OCR workflow completed in {total_time:.2f}s, produced {len(documents)} documents"
-                )
+                        for doc in chunk_docs:
+                            if "page" in doc.metadata:
+                                doc.metadata["page"] += chunk["start_page"]
+                                doc.metadata["page_label"] = doc.metadata["page"] + 1
+                            doc.metadata["total_pages"] = page_count
+                            doc.metadata["file_name"] = self.file_name
+                            doc.metadata["file_size"] = self.file_size
 
-                return documents
+                        all_documents.extend(chunk_docs)
+                    except Exception as e:
+                        failed_chunks += 1
+                        log.error(f"Chunk {chunk_idx + 1}/{len(chunks)} failed: {e}")
+                        all_documents.append(
+                            Document(
+                                page_content=f"[Error extracting pages {chunk['start_page'] + 1}-"
+                                f"{chunk['start_page'] + chunk['page_count']}: {e}]",
+                                metadata={
+                                    "page": chunk["start_page"],
+                                    "page_label": chunk["start_page"] + 1,
+                                    "total_pages": page_count,
+                                    "file_name": self.file_name,
+                                    "error": "chunk_failed",
+                                },
+                            )
+                        )
+            finally:
+                for chunk in chunks:
+                    try:
+                        os.unlink(chunk["path"])
+                    except OSError:
+                        pass
+
+            total_time = time.time() - start_time
+            status = f"{len(chunks)} chunks, {len(all_documents)} documents"
+            if failed_chunks:
+                status += f" ({failed_chunks} chunks failed)"
+            log.info(f"Async chunked OCR completed in {total_time:.2f}s: {status}")
+
+            if not all_documents:
+                return [
+                    Document(
+                        page_content="No text content extracted from document",
+                        metadata={"error": "no_content", "file_name": self.file_name},
+                    )
+                ]
+            return all_documents
 
         except Exception as e:
             total_time = time.time() - start_time
@@ -797,14 +968,6 @@ class MistralLoader:
                     },
                 )
             ]
-        finally:
-            # 5. Cleanup - always attempt file deletion
-            if file_id:
-                try:
-                    async with self._get_session() as session:
-                        await self._delete_file_async(session, file_id)
-                except Exception as cleanup_error:
-                    log.error(f"Cleanup failed for file ID {file_id}: {cleanup_error}")
 
     @staticmethod
     async def load_multiple_async(

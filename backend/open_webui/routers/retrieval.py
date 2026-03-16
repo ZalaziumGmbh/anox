@@ -505,6 +505,14 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "MISTRAL_OCR_API_KEY": request.app.state.config.MISTRAL_OCR_API_KEY,
         "MISTRAL_OCR_USE_BASE64": request.app.state.config.MISTRAL_OCR_USE_BASE64,
         "MISTRAL_OCR_MODEL": request.app.state.config.MISTRAL_OCR_MODEL,
+        # Vision LLM settings
+        "VISION_LLM_API_BASE_URL": request.app.state.config.VISION_LLM_API_BASE_URL,
+        "VISION_LLM_API_KEY": request.app.state.config.VISION_LLM_API_KEY,
+        "VISION_LLM_MODEL": request.app.state.config.VISION_LLM_MODEL,
+        "VISION_LLM_PROMPT": request.app.state.config.VISION_LLM_PROMPT,
+        "VISION_LLM_MAX_TOKENS": request.app.state.config.VISION_LLM_MAX_TOKENS,
+        "VISION_LLM_IMAGE_DPI": request.app.state.config.VISION_LLM_IMAGE_DPI,
+        "VISION_LLM_MAX_CONTEXT_TOKENS": request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
         # MinerU settings
         "MINERU_API_MODE": request.app.state.config.MINERU_API_MODE,
         "MINERU_API_URL": request.app.state.config.MINERU_API_URL,
@@ -710,6 +718,15 @@ class ConfigForm(BaseModel):
     MISTRAL_OCR_API_KEY: Optional[str] = None
     MISTRAL_OCR_USE_BASE64: Optional[bool] = None
     MISTRAL_OCR_MODEL: Optional[str] = None
+
+    # Vision LLM settings
+    VISION_LLM_API_BASE_URL: Optional[str] = None
+    VISION_LLM_API_KEY: Optional[str] = None
+    VISION_LLM_MODEL: Optional[str] = None
+    VISION_LLM_PROMPT: Optional[str] = None
+    VISION_LLM_MAX_TOKENS: Optional[int] = None
+    VISION_LLM_IMAGE_DPI: Optional[int] = None
+    VISION_LLM_MAX_CONTEXT_TOKENS: Optional[int] = None
 
     # MinerU settings
     MINERU_API_MODE: Optional[str] = None
@@ -937,6 +954,43 @@ async def update_rag_config(
         form_data.MISTRAL_OCR_MODEL
         if form_data.MISTRAL_OCR_MODEL is not None
         else request.app.state.config.MISTRAL_OCR_MODEL
+    )
+
+    # Vision LLM settings
+    request.app.state.config.VISION_LLM_API_BASE_URL = (
+        form_data.VISION_LLM_API_BASE_URL
+        if form_data.VISION_LLM_API_BASE_URL is not None
+        else request.app.state.config.VISION_LLM_API_BASE_URL
+    )
+    request.app.state.config.VISION_LLM_API_KEY = (
+        form_data.VISION_LLM_API_KEY
+        if form_data.VISION_LLM_API_KEY is not None
+        else request.app.state.config.VISION_LLM_API_KEY
+    )
+    request.app.state.config.VISION_LLM_MODEL = (
+        form_data.VISION_LLM_MODEL
+        if form_data.VISION_LLM_MODEL is not None
+        else request.app.state.config.VISION_LLM_MODEL
+    )
+    request.app.state.config.VISION_LLM_PROMPT = (
+        form_data.VISION_LLM_PROMPT
+        if form_data.VISION_LLM_PROMPT is not None
+        else request.app.state.config.VISION_LLM_PROMPT
+    )
+    request.app.state.config.VISION_LLM_MAX_TOKENS = (
+        form_data.VISION_LLM_MAX_TOKENS
+        if form_data.VISION_LLM_MAX_TOKENS is not None
+        else request.app.state.config.VISION_LLM_MAX_TOKENS
+    )
+    request.app.state.config.VISION_LLM_IMAGE_DPI = (
+        form_data.VISION_LLM_IMAGE_DPI
+        if form_data.VISION_LLM_IMAGE_DPI is not None
+        else request.app.state.config.VISION_LLM_IMAGE_DPI
+    )
+    request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS = (
+        form_data.VISION_LLM_MAX_CONTEXT_TOKENS
+        if form_data.VISION_LLM_MAX_CONTEXT_TOKENS is not None
+        else request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS
     )
 
     # MinerU settings
@@ -1272,6 +1326,14 @@ async def update_rag_config(
         "MISTRAL_OCR_API_KEY": request.app.state.config.MISTRAL_OCR_API_KEY,
         "MISTRAL_OCR_USE_BASE64": request.app.state.config.MISTRAL_OCR_USE_BASE64,
         "MISTRAL_OCR_MODEL": request.app.state.config.MISTRAL_OCR_MODEL,
+        # Vision LLM settings
+        "VISION_LLM_API_BASE_URL": request.app.state.config.VISION_LLM_API_BASE_URL,
+        "VISION_LLM_API_KEY": request.app.state.config.VISION_LLM_API_KEY,
+        "VISION_LLM_MODEL": request.app.state.config.VISION_LLM_MODEL,
+        "VISION_LLM_PROMPT": request.app.state.config.VISION_LLM_PROMPT,
+        "VISION_LLM_MAX_TOKENS": request.app.state.config.VISION_LLM_MAX_TOKENS,
+        "VISION_LLM_IMAGE_DPI": request.app.state.config.VISION_LLM_IMAGE_DPI,
+        "VISION_LLM_MAX_CONTEXT_TOKENS": request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
         # MinerU settings
         "MINERU_API_MODE": request.app.state.config.MINERU_API_MODE,
         "MINERU_API_URL": request.app.state.config.MINERU_API_URL,
@@ -1785,6 +1847,13 @@ def process_file(
                         MISTRAL_OCR_API_KEY=request.app.state.config.MISTRAL_OCR_API_KEY,
                         MISTRAL_OCR_USE_BASE64=request.app.state.config.MISTRAL_OCR_USE_BASE64,
                         MISTRAL_OCR_MODEL=request.app.state.config.MISTRAL_OCR_MODEL,
+                        VISION_LLM_API_BASE_URL=request.app.state.config.VISION_LLM_API_BASE_URL,
+                        VISION_LLM_API_KEY=request.app.state.config.VISION_LLM_API_KEY,
+                        VISION_LLM_MODEL=request.app.state.config.VISION_LLM_MODEL,
+                        VISION_LLM_PROMPT=request.app.state.config.VISION_LLM_PROMPT,
+                        VISION_LLM_MAX_TOKENS=request.app.state.config.VISION_LLM_MAX_TOKENS,
+                        VISION_LLM_IMAGE_DPI=request.app.state.config.VISION_LLM_IMAGE_DPI,
+                        VISION_LLM_MAX_CONTEXT_TOKENS=request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
                         MINERU_API_MODE=request.app.state.config.MINERU_API_MODE,
                         MINERU_API_URL=request.app.state.config.MINERU_API_URL,
                         MINERU_API_KEY=request.app.state.config.MINERU_API_KEY,
