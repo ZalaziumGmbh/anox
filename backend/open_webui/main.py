@@ -6,6 +6,7 @@ import mimetypes
 import os
 import shutil
 import sys
+import threading
 import time
 import random
 import re
@@ -251,6 +252,7 @@ from open_webui.config import (
     RAG_ALLOWED_FILE_EXTENSIONS,
     RAG_FILE_MAX_COUNT,
     RAG_FILE_MAX_SIZE,
+    FILE_UPLOAD_MAX_CONCURRENT,
     FILE_IMAGE_COMPRESSION_WIDTH,
     FILE_IMAGE_COMPRESSION_HEIGHT,
     RAG_OPENAI_API_BASE_URL,
@@ -956,8 +958,13 @@ app.state.config.HYBRID_BM25_WEIGHT = RAG_HYBRID_BM25_WEIGHT
 app.state.config.ALLOWED_FILE_EXTENSIONS = RAG_ALLOWED_FILE_EXTENSIONS
 app.state.config.FILE_MAX_SIZE = RAG_FILE_MAX_SIZE
 app.state.config.FILE_MAX_COUNT = RAG_FILE_MAX_COUNT
+app.state.config.FILE_UPLOAD_MAX_CONCURRENT = FILE_UPLOAD_MAX_CONCURRENT
 app.state.config.FILE_IMAGE_COMPRESSION_WIDTH = FILE_IMAGE_COMPRESSION_WIDTH
 app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT = FILE_IMAGE_COMPRESSION_HEIGHT
+
+app.state.upload_semaphore = threading.BoundedSemaphore(
+    app.state.config.FILE_UPLOAD_MAX_CONCURRENT
+)
 
 
 app.state.config.RAG_FULL_CONTEXT = RAG_FULL_CONTEXT

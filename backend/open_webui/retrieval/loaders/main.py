@@ -11,6 +11,7 @@ from langchain_community.document_loaders import (
     CSVLoader,
     Docx2txtLoader,
     OutlookMessageLoader,
+    PDFPlumberLoader,
     PyPDFLoader,
     TextLoader,
     UnstructuredEPubLoader,
@@ -210,7 +211,7 @@ class Loader:
         if docs and any(doc.page_content.strip() for doc in docs):
             return docs
 
-        log.warning(f"PyMuPDFLoader returned empty or invalid content for {filename}")
+        log.warning(f"Primary PDF loader returned empty content for {filename}; falling back to UnstructuredPDFLoader (OCR)")
         if not isinstance(loader, UnstructuredPDFLoader):
             extract_images = self.kwargs.get("PDF_EXTRACT_IMAGES", True)
             fallback_loader = UnstructuredPDFLoader(file_path, extract_images=extract_images)
@@ -403,11 +404,9 @@ class Loader:
             )
         else:
             if file_ext == "pdf":
-                loader = PyPDFLoader(
-                    file_path,
-                    extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES"),
-                    mode=self.kwargs.get("PDF_LOADER_MODE", "page"),
-                )
+                # pdfplumber: MIT-licensed, thread-safe per-document, preserves
+                # table layout better than pypdf. Returns one Document per page.
+                loader = PDFPlumberLoader(file_path)
             elif file_ext == "csv":
                 loader = CSVLoader(file_path, autodetect_encoding=True)
             elif file_ext == "rst":

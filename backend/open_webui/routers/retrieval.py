@@ -534,6 +534,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         # File upload settings
         "FILE_MAX_SIZE": request.app.state.config.FILE_MAX_SIZE,
         "FILE_MAX_COUNT": request.app.state.config.FILE_MAX_COUNT,
+        "FILE_UPLOAD_MAX_CONCURRENT": request.app.state.config.FILE_UPLOAD_MAX_CONCURRENT,
         "FILE_IMAGE_COMPRESSION_WIDTH": request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH,
         "FILE_IMAGE_COMPRESSION_HEIGHT": request.app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT,
         "ALLOWED_FILE_EXTENSIONS": request.app.state.config.ALLOWED_FILE_EXTENSIONS,
@@ -752,6 +753,7 @@ class ConfigForm(BaseModel):
     # File upload settings
     FILE_MAX_SIZE: Optional[int] = None
     FILE_MAX_COUNT: Optional[int] = None
+    FILE_UPLOAD_MAX_CONCURRENT: Optional[int] = None
     FILE_IMAGE_COMPRESSION_WIDTH: Optional[int] = None
     FILE_IMAGE_COMPRESSION_HEIGHT: Optional[int] = None
     ALLOWED_FILE_EXTENSIONS: Optional[List[str]] = None
@@ -1133,6 +1135,22 @@ async def update_rag_config(
         if form_data.FILE_MAX_COUNT is not None
         else request.app.state.config.FILE_MAX_COUNT
     )
+    if (
+        form_data.FILE_UPLOAD_MAX_CONCURRENT is not None
+        and form_data.FILE_UPLOAD_MAX_CONCURRENT > 0
+        and form_data.FILE_UPLOAD_MAX_CONCURRENT
+        != request.app.state.config.FILE_UPLOAD_MAX_CONCURRENT
+    ):
+        # Rebuild the semaphore so new uploads use the new cap immediately.
+        # In-flight tasks keep their reference to the old semaphore — they
+        # release back to it harmlessly when finished.
+        request.app.state.config.FILE_UPLOAD_MAX_CONCURRENT = (
+            form_data.FILE_UPLOAD_MAX_CONCURRENT
+        )
+        import threading
+        request.app.state.upload_semaphore = threading.BoundedSemaphore(
+            form_data.FILE_UPLOAD_MAX_CONCURRENT
+        )
     request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH = (
         form_data.FILE_IMAGE_COMPRESSION_WIDTH
         if form_data.FILE_IMAGE_COMPRESSION_WIDTH is not None
@@ -1355,6 +1373,7 @@ async def update_rag_config(
         # File upload settings
         "FILE_MAX_SIZE": request.app.state.config.FILE_MAX_SIZE,
         "FILE_MAX_COUNT": request.app.state.config.FILE_MAX_COUNT,
+        "FILE_UPLOAD_MAX_CONCURRENT": request.app.state.config.FILE_UPLOAD_MAX_CONCURRENT,
         "FILE_IMAGE_COMPRESSION_WIDTH": request.app.state.config.FILE_IMAGE_COMPRESSION_WIDTH,
         "FILE_IMAGE_COMPRESSION_HEIGHT": request.app.state.config.FILE_IMAGE_COMPRESSION_HEIGHT,
         "ALLOWED_FILE_EXTENSIONS": request.app.state.config.ALLOWED_FILE_EXTENSIONS,

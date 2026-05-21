@@ -4,7 +4,15 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import BinaryIO, Tuple, Dict
+from typing import BinaryIO, Tuple, Dict, Optional
+
+
+class FileTooLargeError(Exception):
+    """Raised when an upload exceeds the configured size limit."""
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max_bytes
+        super().__init__(f"File exceeds size limit of {max_bytes} bytes")
 
 import boto3
 from botocore.config import Config
@@ -60,15 +68,34 @@ class StorageProvider(ABC):
 class LocalStorageProvider(StorageProvider):
     @staticmethod
     def upload_file(
-        file: BinaryIO, filename: str, tags: Dict[str, str]
+        file: BinaryIO,
+        filename: str,
+        tags: Dict[str, str],
+        max_bytes: Optional[int] = None,
     ) -> Tuple[bytes, str]:
-        contents = file.read()
-        if not contents:
-            raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
         file_path = f"{UPLOAD_DIR}/{filename}"
-        with open(file_path, "wb") as f:
-            f.write(contents)
-        return contents, file_path
+        total = 0
+        chunk_size = 1024 * 1024  # 1 MiB
+        try:
+            with open(file_path, "wb") as out:
+                while True:
+                    chunk = file.read(chunk_size)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if max_bytes is not None and total > max_bytes:
+                        raise FileTooLargeError(max_bytes)
+                    out.write(chunk)
+        except FileTooLargeError:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise
+        if total == 0:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+        # Callers should use os.path.getsize(file_path) instead of len(contents).
+        return b"", file_path
 
     @staticmethod
     def get_file(file_path: str) -> str:

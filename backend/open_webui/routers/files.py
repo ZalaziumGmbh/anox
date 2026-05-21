@@ -44,7 +44,7 @@ from open_webui.models.access_grants import AccessGrants
 from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.routers.audio import transcribe
 
-from open_webui.storage.provider import Storage
+from open_webui.storage.provider import Storage, FileTooLargeError
 
 
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
@@ -210,6 +210,20 @@ def upload_file_handler(
             )
     file_metadata = metadata if metadata else {}
 
+    # Backend-enforced size cap (frontend cap is advisory only).
+    max_mb = request.app.state.config.FILE_MAX_SIZE
+    max_bytes = int(max_mb) * 1024 * 1024 if max_mb else None
+    cl = request.headers.get("content-length")
+    if max_bytes and cl:
+        try:
+            if int(cl) > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f"{max_mb} MB"),
+                )
+        except ValueError:
+            pass  # malformed header — streaming write will still enforce the cap
+
     try:
         unsanitized_filename = file.filename
         filename = os.path.basename(unsanitized_filename)
@@ -235,16 +249,23 @@ def upload_file_handler(
         id = str(uuid.uuid4())
         name = filename
         filename = f"{id}_{filename}"
-        contents, file_path = Storage.upload_file(
-            file.file,
-            filename,
-            {
-                "OpenWebUI-User-Email": user.email,
-                "OpenWebUI-User-Id": user.id,
-                "OpenWebUI-User-Name": user.name,
-                "OpenWebUI-File-Id": id,
-            },
-        )
+        try:
+            contents, file_path = Storage.upload_file(
+                file.file,
+                filename,
+                {
+                    "OpenWebUI-User-Email": user.email,
+                    "OpenWebUI-User-Id": user.id,
+                    "OpenWebUI-User-Name": user.name,
+                    "OpenWebUI-File-Id": id,
+                },
+                max_bytes=max_bytes,
+            )
+        except FileTooLargeError:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=ERROR_MESSAGES.FILE_TOO_LARGE(size=f"{max_mb} MB"),
+            )
 
         file_item = Files.insert_new_file(
             user.id,
@@ -263,7 +284,7 @@ def upload_file_handler(
                             if isinstance(file.content_type, str)
                             else None
                         ),
-                        "size": len(contents),
+                        "size": os.path.getsize(file_path),
                         "data": file_metadata,
                     },
                 }
@@ -281,9 +302,15 @@ def upload_file_handler(
                 )
 
         if process:
+            upload_semaphore = request.app.state.upload_semaphore
+
+            def _gated_process_uploaded_file(*args, **kwargs):
+                with upload_semaphore:
+                    process_uploaded_file(*args, **kwargs)
+
             if background_tasks and process_in_background:
                 background_tasks.add_task(
-                    process_uploaded_file,
+                    _gated_process_uploaded_file,
                     request,
                     file,
                     file_path,
@@ -293,7 +320,7 @@ def upload_file_handler(
                 )
                 return {"status": True, **file_item.model_dump()}
             else:
-                process_uploaded_file(
+                _gated_process_uploaded_file(
                     request,
                     file,
                     file_path,

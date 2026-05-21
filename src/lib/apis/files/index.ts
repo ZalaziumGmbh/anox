@@ -29,11 +29,24 @@ export const uploadFile = async (
 		body: data
 	})
 		.then(async (res) => {
-			if (!res.ok) throw await res.json();
+			if (!res.ok) {
+				let detail = `Upload failed: ${res.status}`;
+				try {
+					const body = await res.json();
+					detail = body?.detail || detail;
+				} catch (_) {
+					/* non-JSON body */
+				}
+				const err: any = new Error(detail);
+				err.status = res.status;
+				err.detail = detail;
+				err.retryAfter = res.headers.get('Retry-After');
+				throw err;
+			}
 			return res.json();
 		})
 		.catch((err) => {
-			error = err.detail || err.message;
+			error = err;
 			console.error(err);
 			return null;
 		});

@@ -2943,8 +2943,14 @@ RAG_FILE_MAX_SIZE = PersistentConfig(
     (
         int(os.environ.get("RAG_FILE_MAX_SIZE"))
         if os.environ.get("RAG_FILE_MAX_SIZE")
-        else None
+        else 50  # MB; backend-enforced cap when env unset
     ),
+)
+
+FILE_UPLOAD_MAX_CONCURRENT = PersistentConfig(
+    "FILE_UPLOAD_MAX_CONCURRENT",
+    "file.upload.max_concurrent",
+    int(os.environ.get("FILE_UPLOAD_MAX_CONCURRENT", "4")),
 )
 
 FILE_IMAGE_COMPRESSION_WIDTH = PersistentConfig(

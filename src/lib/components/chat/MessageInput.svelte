@@ -633,8 +633,11 @@
 					files = files.filter((item) => item?.itemId !== tempItemId);
 				}
 			} catch (e) {
-				toast.error(`${e}`);
+				if (e?.status !== 429) {
+					toast.error(`${e?.detail ?? e}`);
+				}
 				files = files.filter((item) => item?.itemId !== tempItemId);
+				throw e;
 			}
 		} else {
 			// If temporary chat is enabled, we just add the file to the list without uploading it.
@@ -682,7 +685,43 @@
 			return;
 		}
 
-		inputFiles.forEach(async (file) => {
+		const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
+			// Quick shortcut so we don’t do unnecessary work.
+			const settingsCompression = settings?.imageCompression ?? false;
+			const configWidth = config?.file?.image_compression?.width ?? null;
+			const configHeight = config?.file?.image_compression?.height ?? null;
+
+			// If neither settings nor config wants compression, return original URL.
+			if (!settingsCompression && !configWidth && !configHeight) {
+				return imageUrl;
+			}
+
+			// Default to null (no compression unless set)
+			let width = null;
+			let height = null;
+
+			// If user/settings want compression, pick their preferred size.
+			if (settingsCompression) {
+				width = settings?.imageCompressionSize?.width ?? null;
+				height = settings?.imageCompressionSize?.height ?? null;
+			}
+
+			// Apply config limits as an upper bound if any
+			if (configWidth && (width === null || width > configWidth)) {
+				width = configWidth;
+			}
+			if (configHeight && (height === null || height > configHeight)) {
+				height = configHeight;
+			}
+
+			// Do the compression if required
+			if (width || height) {
+				return await compressImage(imageUrl, width, height);
+			}
+			return imageUrl;
+		};
+
+		const processOneFile = async (file) => {
 			console.log('Processing file:', {
 				name: file.name,
 				type: file.type,
@@ -694,10 +733,6 @@
 				($config?.file?.max_size ?? null) !== null &&
 				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
 			) {
-				console.log('File exceeds max size limit:', {
-					fileSize: file.size,
-					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
-				});
 				toast.error(
 					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
 						maxSize: $config?.file?.max_size
@@ -712,70 +747,33 @@
 					return;
 				}
 
-				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
-					// Quick shortcut so we don’t do unnecessary work.
-					const settingsCompression = settings?.imageCompression ?? false;
-					const configWidth = config?.file?.image_compression?.width ?? null;
-					const configHeight = config?.file?.image_compression?.height ?? null;
+				const sourceFile =
+					file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file;
+				const imageUrl = await new Promise((resolve, reject) => {
+					const reader = new FileReader();
+					reader.onload = (event) => resolve(event.target.result);
+					reader.onerror = () => reject(reader.error);
+					reader.readAsDataURL(sourceFile);
+				});
 
-					// If neither settings nor config wants compression, return original URL.
-					if (!settingsCompression && !configWidth && !configHeight) {
-						return imageUrl;
-					}
+				const compressedUrl = await compressImageHandler(imageUrl, $settings, $config);
 
-					// Default to null (no compression unless set)
-					let width = null;
-					let height = null;
-
-					// If user/settings want compression, pick their preferred size.
-					if (settingsCompression) {
-						width = settings?.imageCompressionSize?.width ?? null;
-						height = settings?.imageCompressionSize?.height ?? null;
-					}
-
-					// Apply config limits as an upper bound if any
-					if (configWidth && (width === null || width > configWidth)) {
-						width = configWidth;
-					}
-					if (configHeight && (height === null || height > configHeight)) {
-						height = configHeight;
-					}
-
-					// Do the compression if required
-					if (width || height) {
-						return await compressImage(imageUrl, width, height);
-					}
-					return imageUrl;
-				};
-
-				let reader = new FileReader();
-
-				reader.onload = async (event) => {
-					let imageUrl = event.target.result;
-
-					// Compress the image if settings or config require it
-					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
-
-					if ($temporaryChatEnabled) {
-						files = [
-							...files,
-							{
-								type: 'image',
-								url: imageUrl
-							}
-						];
-					} else {
-						const blob = await (await fetch(imageUrl)).blob();
-						const compressedFile = new File([blob], file.name, { type: file.type });
-
-						uploadFileHandler(compressedFile, false);
-					}
-				};
-
-				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
+				if ($temporaryChatEnabled) {
+					files = [...files, { type: 'image', url: compressedUrl }];
+				} else {
+					const blob = await (await fetch(compressedUrl)).blob();
+					const compressedFile = new File([blob], file.name, { type: file.type });
+					await uploadFileHandler(compressedFile, false);
+				}
 			} else {
-				uploadFileHandler(file);
+				await uploadFileHandler(file);
 			}
+		};
+
+		inputFiles.forEach((file) => {
+			processOneFile(file).catch(() => {
+				/* error already surfaced by uploadFileHandler / toast */
+			});
 		});
 	};
 

@@ -1527,6 +1527,27 @@
 					</div>
 
 					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">{$i18n.t('Max Concurrent Processing')}</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'Maximum number of files processed in parallel (extraction + embedding). Higher values use more RAM and CPU. Recommended: 4 on 16 GB / 4 cores.'
+								)}
+								placement="top-start"
+							>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									type="number"
+									placeholder="4"
+									bind:value={RAGConfig.FILE_UPLOAD_MAX_CONCURRENT}
+									autocomplete="off"
+									min="1"
+								/>
+							</Tooltip>
+						</div>
+					</div>
+
+					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Image Compression Width')}</div>
 						<div class="flex items-center relative">
 							<Tooltip
