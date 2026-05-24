@@ -19,9 +19,6 @@ log = logging.getLogger(__name__)
 
 _PDFIUM_LOCK = threading.Lock()
 
-DEFAULT_EXTRACTION_PROMPT = "Extract all text from this image accurately. Output the content as clean markdown. Preserve the structure: headings, lists, tables, etc. Do not add any commentary."
-
-
 class VisionLLMLoader:
     """
     Content extraction loader that uses a vision-capable LLM via OpenAI-compatible
@@ -68,7 +65,7 @@ class VisionLLMLoader:
         self.api_key = api_key or ""
         self.model = model
         self.file_path = file_path
-        self.prompt = prompt or DEFAULT_EXTRACTION_PROMPT
+        self.prompt = prompt
         self.max_tokens = max_tokens
         self.max_context_tokens = max_context_tokens
         self.timeout = timeout
