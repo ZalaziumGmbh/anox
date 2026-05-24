@@ -2876,6 +2876,12 @@ VISION_LLM_IMAGE_DPI = PersistentConfig(
     int(os.environ.get("VISION_LLM_IMAGE_DPI", "200")),
 )
 
+VISION_LLM_CONCURRENCY = PersistentConfig(
+    "VISION_LLM_CONCURRENCY",
+    "rag.vision_llm_concurrency",
+    int(os.environ.get("VISION_LLM_CONCURRENCY", "4")),
+)
+
 VISION_LLM_MAX_CONTEXT_TOKENS = PersistentConfig(
     "VISION_LLM_MAX_CONTEXT_TOKENS",
     "rag.vision_llm_max_context_tokens",

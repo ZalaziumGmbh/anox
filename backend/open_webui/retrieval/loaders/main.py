@@ -401,6 +401,7 @@ class Loader:
                 max_tokens=self.kwargs.get("VISION_LLM_MAX_TOKENS", 8192),
                 max_context_tokens=self.kwargs.get("VISION_LLM_MAX_CONTEXT_TOKENS", 32768),
                 image_dpi=self.kwargs.get("VISION_LLM_IMAGE_DPI", 200),
+                max_workers=self.kwargs.get("VISION_LLM_CONCURRENCY"),
             )
         else:
             if file_ext == "pdf":

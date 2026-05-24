@@ -1,9 +1,12 @@
 import base64
+import concurrent.futures
+import gc
 import io
 import logging
 import math
 import os
 import sys
+import threading
 import time
 import requests
 from typing import List, Dict, Any, Optional, Tuple
@@ -14,6 +17,8 @@ from open_webui.env import GLOBAL_LOG_LEVEL
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 
+_PDFIUM_LOCK = threading.Lock()
+
 DEFAULT_EXTRACTION_PROMPT = "Extract all text from this image accurately. Output the content as clean markdown. Preserve the structure: headings, lists, tables, etc. Do not add any commentary."
 
 
@@ -22,7 +27,9 @@ class VisionLLMLoader:
     Content extraction loader that uses a vision-capable LLM via OpenAI-compatible
     chat completions API (e.g. LiteLLM proxy) to extract text from documents.
 
-    Processes one page per API call sequentially.
+    Processes one page per API call, with pages fanned out across a thread
+    pool (size = max_workers). PDF rendering stays serial because pypdfium2
+    is not safe across one PdfDocument from multiple threads.
     Auto-scales DPI to fit the model's context window.
     Continues on page errors to ensure the whole document is processed.
     """
@@ -50,6 +57,7 @@ class VisionLLMLoader:
         timeout: int = 120,
         max_retries: int = 2,
         image_dpi: int = 200,
+        max_workers: Optional[int] = None,
     ):
         if not api_base_url:
             raise ValueError("API base URL is required for Vision LLM loader.")
@@ -66,6 +74,10 @@ class VisionLLMLoader:
         self.timeout = timeout
         self.max_retries = max_retries
         self.image_dpi = image_dpi
+
+        if max_workers is None:
+            max_workers = int(os.environ.get("VISION_LLM_CONCURRENCY", "8"))
+        self.max_workers = max(1, max_workers)
 
         self.file_name = os.path.basename(file_path)
         self.file_ext = self.file_name.rsplit(".", 1)[-1].lower() if "." in self.file_name else ""
@@ -105,13 +117,18 @@ class VisionLLMLoader:
                 "Install it with: pip install pypdfium2"
             )
         sizes = []
-        pdf = pdfium.PdfDocument(self.file_path)
-        try:
-            for i in range(len(pdf)):
-                page = pdf[i]
-                sizes.append((page.get_width(), page.get_height()))
-        finally:
-            pdf.close()
+        with _PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(self.file_path)
+            try:
+                for i in range(len(pdf)):
+                    page = pdf[i]
+                    sizes.append((page.get_width(), page.get_height()))
+                    page.close()  # free PDFium handle now, not at GC time
+            finally:
+                pdf.close()
+                # Run any remaining pypdfium2 finalizers under the lock so they
+                # can't fire later on another thread mid-render (segfault).
+                gc.collect()
         return sizes
 
     def _resolve_dpi(self, page_sizes: List[Tuple[float, float]]) -> int:
@@ -148,19 +165,27 @@ class VisionLLMLoader:
             )
 
         images = []
-        pdf = pdfium.PdfDocument(self.file_path)
-        try:
-            scale = dpi / 72.0
-            for page_num in range(len(pdf)):
-                page = pdf[page_num]
-                bitmap = page.render(scale=scale)
-                pil_image = bitmap.to_pil()
-                buf = io.BytesIO()
-                pil_image.save(buf, format="PNG")
-                images.append(buf.getvalue())
-                log.debug(f"Rendered PDF page {page_num + 1}/{len(pdf)} ({len(images[-1])} bytes)")
-        finally:
-            pdf.close()
+        with _PDFIUM_LOCK:
+            pdf = pdfium.PdfDocument(self.file_path)
+            try:
+                scale = dpi / 72.0
+                for page_num in range(len(pdf)):
+                    page = pdf[page_num]
+                    bitmap = page.render(scale=scale)
+                    pil_image = bitmap.to_pil()
+                    buf = io.BytesIO()
+                    pil_image.save(buf, format="PNG")
+                    images.append(buf.getvalue())
+                    log.debug(f"Rendered PDF page {page_num + 1}/{len(pdf)} ({len(images[-1])} bytes)")
+                    # Free PDFium handles deterministically (PIL bytes already
+                    # copied into buf above), not at GC time on another thread.
+                    bitmap.close()
+                    page.close()
+            finally:
+                pdf.close()
+                # Run any remaining pypdfium2 finalizers under the lock so they
+                # can't fire later mid-render on another thread (segfault).
+                gc.collect()
 
         return images
 
@@ -279,10 +304,12 @@ class VisionLLMLoader:
             ]
 
     def _load_pdf(self) -> List[Document]:
-        """Extract text from every page of a PDF, one API call per page.
+        """Extract text from every page of a PDF in parallel.
 
-        Never stops early — if a page fails after retries, it is recorded
-        as an error document so downstream consumers know it was attempted.
+        Page rendering runs serially (pypdfium2 isn't safe across one
+        PdfDocument from multiple threads), then API calls are dispatched
+        through a ThreadPoolExecutor. Per-page failures are recorded as
+        error Documents so the whole document is always processed.
         """
         log.info(f"Vision LLM: processing PDF '{self.file_name}'")
 
@@ -290,42 +317,71 @@ class VisionLLMLoader:
         total_pages = len(page_sizes)
         effective_dpi = self._resolve_dpi(page_sizes)
 
-        log.info(f"Vision LLM: {total_pages} pages at {effective_dpi} DPI")
+        workers = min(self.max_workers, total_pages)
+        log.info(
+            f"Vision LLM: {total_pages} pages at {effective_dpi} DPI, "
+            f"parallel workers={workers}"
+        )
 
         page_images = self._pdf_pages_to_images(effective_dpi)
 
-        documents = []
-        failed = 0
-        for page_idx, img_bytes in enumerate(page_images):
-            page_label = page_idx + 1
-            log.info(f"Vision LLM: extracting page {page_label}/{total_pages}")
+        results: Dict[int, Tuple[Optional[str], Optional[Exception]]] = {}
 
+        def _process_page(idx: int, img_bytes: bytes):
+            label = idx + 1
+            t0 = time.time()
+            log.info(f"Vision LLM: page {label}/{total_pages} start")
             try:
                 text = self._call_vision_api(img_bytes, "image/png")
+                elapsed = time.time() - t0
+                log.info(
+                    f"Vision LLM: page {label}/{total_pages} done in "
+                    f"{elapsed:.1f}s ({len(text) if text else 0} chars)"
+                )
+                return idx, text, None
             except Exception as e:
-                log.error(f"Vision LLM: page {page_label}/{total_pages} failed: {e}")
+                elapsed = time.time() - t0
+                log.error(
+                    f"Vision LLM: page {label}/{total_pages} failed after "
+                    f"{elapsed:.1f}s: {e}"
+                )
+                return idx, None, e
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [
+                ex.submit(_process_page, idx, img_bytes)
+                for idx, img_bytes in enumerate(page_images)
+            ]
+            for fut in concurrent.futures.as_completed(futures):
+                idx, text, err = fut.result()
+                results[idx] = (text, err)
+
+        documents: List[Document] = []
+        failed = 0
+        for idx in range(total_pages):
+            text, err = results.get(idx, (None, None))
+            label = idx + 1
+            if err is not None:
                 failed += 1
                 documents.append(
                     Document(
-                        page_content=f"[Error extracting page {page_label}: {e}]",
+                        page_content=f"[Error extracting page {label}: {err}]",
                         metadata={
-                            "page": page_idx,
-                            "page_label": page_label,
+                            "page": idx,
+                            "page_label": label,
                             "total_pages": total_pages,
                             "file_name": self.file_name,
                             "error": "page_failed",
                         },
                     )
                 )
-                continue
-
-            if text:
+            elif text:
                 documents.append(
                     Document(
                         page_content=text,
                         metadata={
-                            "page": page_idx,
-                            "page_label": page_label,
+                            "page": idx,
+                            "page_label": label,
                             "total_pages": total_pages,
                             "file_name": self.file_name,
                             "processing_engine": "vision_llm",
@@ -336,7 +392,7 @@ class VisionLLMLoader:
                     )
                 )
             else:
-                log.warning(f"Vision LLM: empty response for page {page_label}")
+                log.warning(f"Vision LLM: empty response for page {label}")
 
         if not documents:
             return [

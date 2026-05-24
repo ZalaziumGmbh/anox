@@ -512,6 +512,7 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
         "VISION_LLM_PROMPT": request.app.state.config.VISION_LLM_PROMPT,
         "VISION_LLM_MAX_TOKENS": request.app.state.config.VISION_LLM_MAX_TOKENS,
         "VISION_LLM_IMAGE_DPI": request.app.state.config.VISION_LLM_IMAGE_DPI,
+        "VISION_LLM_CONCURRENCY": request.app.state.config.VISION_LLM_CONCURRENCY,
         "VISION_LLM_MAX_CONTEXT_TOKENS": request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
         # MinerU settings
         "MINERU_API_MODE": request.app.state.config.MINERU_API_MODE,
@@ -727,6 +728,7 @@ class ConfigForm(BaseModel):
     VISION_LLM_PROMPT: Optional[str] = None
     VISION_LLM_MAX_TOKENS: Optional[int] = None
     VISION_LLM_IMAGE_DPI: Optional[int] = None
+    VISION_LLM_CONCURRENCY: Optional[int] = None
     VISION_LLM_MAX_CONTEXT_TOKENS: Optional[int] = None
 
     # MinerU settings
@@ -988,6 +990,11 @@ async def update_rag_config(
         form_data.VISION_LLM_IMAGE_DPI
         if form_data.VISION_LLM_IMAGE_DPI is not None
         else request.app.state.config.VISION_LLM_IMAGE_DPI
+    )
+    request.app.state.config.VISION_LLM_CONCURRENCY = (
+        form_data.VISION_LLM_CONCURRENCY
+        if form_data.VISION_LLM_CONCURRENCY is not None
+        else request.app.state.config.VISION_LLM_CONCURRENCY
     )
     request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS = (
         form_data.VISION_LLM_MAX_CONTEXT_TOKENS
@@ -1351,6 +1358,7 @@ async def update_rag_config(
         "VISION_LLM_PROMPT": request.app.state.config.VISION_LLM_PROMPT,
         "VISION_LLM_MAX_TOKENS": request.app.state.config.VISION_LLM_MAX_TOKENS,
         "VISION_LLM_IMAGE_DPI": request.app.state.config.VISION_LLM_IMAGE_DPI,
+        "VISION_LLM_CONCURRENCY": request.app.state.config.VISION_LLM_CONCURRENCY,
         "VISION_LLM_MAX_CONTEXT_TOKENS": request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
         # MinerU settings
         "MINERU_API_MODE": request.app.state.config.MINERU_API_MODE,
@@ -1872,6 +1880,7 @@ def process_file(
                         VISION_LLM_PROMPT=request.app.state.config.VISION_LLM_PROMPT,
                         VISION_LLM_MAX_TOKENS=request.app.state.config.VISION_LLM_MAX_TOKENS,
                         VISION_LLM_IMAGE_DPI=request.app.state.config.VISION_LLM_IMAGE_DPI,
+                        VISION_LLM_CONCURRENCY=request.app.state.config.VISION_LLM_CONCURRENCY,
                         VISION_LLM_MAX_CONTEXT_TOKENS=request.app.state.config.VISION_LLM_MAX_CONTEXT_TOKENS,
                         MINERU_API_MODE=request.app.state.config.MINERU_API_MODE,
                         MINERU_API_URL=request.app.state.config.MINERU_API_URL,

@@ -1548,6 +1548,27 @@
 					</div>
 
 					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">{$i18n.t('Vision LLM Page Concurrency')}</div>
+						<div class="flex items-center relative">
+							<Tooltip
+								content={$i18n.t(
+									'Pages per document sent to the Vision LLM in parallel. Total upstream load = Max Concurrent Processing × this value. Lower it if the model times out or returns truncated pages under load.'
+								)}
+								placement="top-start"
+							>
+								<input
+									class="flex-1 w-full text-sm bg-transparent outline-hidden"
+									type="number"
+									placeholder="8"
+									bind:value={RAGConfig.VISION_LLM_CONCURRENCY}
+									autocomplete="off"
+									min="1"
+								/>
+							</Tooltip>
+						</div>
+					</div>
+
+					<div class="  mb-2.5 flex w-full justify-between">
 						<div class=" self-center text-xs font-medium">{$i18n.t('Image Compression Width')}</div>
 						<div class="flex items-center relative">
 							<Tooltip
