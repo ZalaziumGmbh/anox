@@ -135,7 +135,7 @@ RUN apt-get update && \
 COPY --chown=$UID:$GID ./backend/requirements.txt ./requirements.txt
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libglib2.0-0 poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng && \
+    apt-get install -y --no-install-recommends libglib2.0-0 poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng libreoffice-impress && \
     rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir uv && \
