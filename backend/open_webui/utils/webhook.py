@@ -23,7 +23,7 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict) -> b
                 if len(message) < 2000
                 else f"{message[: 2000 - 20]}... (truncated)"
             )
-        # Microsoft Teams Webhooks
+        # Microsoft Teams — legacy Office 365 connector incoming webhook (retired)
         elif "webhook.office.com" in url:
             action = event_data.get("action", "undefined")
             facts = [
@@ -42,6 +42,81 @@ async def post_webhook(name: str, url: str, message: str, event_data: dict) -> b
                         "activityImage": WEBUI_FAVICON_URL,
                         "facts": facts,
                         "markdown": True,
+                    }
+                ],
+            }
+        # Microsoft Teams — new "Workflows" (Power Automate / Logic Apps) webhook.
+        # The "Post card in a chat or channel" action requires the bot message
+        # envelope with an Adaptive Card inside; anything whose top-level type is
+        # not "AdaptiveCard" fails with "Property 'type' must be 'AdaptiveCard'".
+        elif any(
+            host in url
+            for host in (
+                "logic.azure.com",
+                "azure-apim.net",
+                "powerplatform.com",
+                "powerautomate.com",
+            )
+        ):
+            action = event_data.get("action", "undefined")
+            user = json.loads(event_data.get("user") or "{}")
+            facts = [{"title": f"{key}:", "value": str(value)} for key, value in user.items()]
+            payload = {
+                "type": "message",
+                "attachments": [
+                    {
+                        "contentType": "application/vnd.microsoft.card.adaptive",
+                        "contentUrl": None,
+                        "content": {
+                            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                            "type": "AdaptiveCard",
+                            "version": "1.4",
+                            "body": [
+                                {
+                                    "type": "ColumnSet",
+                                    "columns": [
+                                        {
+                                            "type": "Column",
+                                            "width": "auto",
+                                            "verticalContentAlignment": "Center",
+                                            "items": [
+                                                {
+                                                    "type": "Image",
+                                                    "url": WEBUI_FAVICON_URL,
+                                                    "size": "Small",
+                                                    "altText": name,
+                                                }
+                                            ],
+                                        },
+                                        {
+                                            "type": "Column",
+                                            "width": "stretch",
+                                            "verticalContentAlignment": "Center",
+                                            "items": [
+                                                {
+                                                    "type": "TextBlock",
+                                                    "size": "Medium",
+                                                    "weight": "Bolder",
+                                                    "text": message,
+                                                    "wrap": True,
+                                                },
+                                                {
+                                                    "type": "TextBlock",
+                                                    "spacing": "None",
+                                                    "isSubtle": True,
+                                                    "wrap": True,
+                                                    "text": (
+                                                        f"{name} ({VERSION}) - {action} - "
+                                                        f"Environment: {event_data.get('environment')}"
+                                                    ),
+                                                },
+                                            ],
+                                        },
+                                    ],
+                                },
+                                {"type": "FactSet", "facts": facts},
+                            ],
+                        },
                     }
                 ],
             }
